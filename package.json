@@ -1,0 +1,29 @@
+{
+  "name": "codex-hub",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "A local persistent Codex app-server hub for multiple controllers",
+  "bin": {
+    "codex-hub": "src/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/client.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:live": "node test/live.mjs",
+    "test:smoke": "node test/smoke.mjs"
+  },
+  "files": [
+    "src/",
+    "PROTOCOL.md",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ]
+}
