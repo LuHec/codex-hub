@@ -5,6 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { AppServer } from './codex.mjs';
+import { Store } from './store.mjs';
 import { Sessions } from './sessions.mjs';
 import { hubEndpoint, stateDirectory, VERSION } from './config.mjs';
 import { PROTOCOL, methods, validate, fault } from './protocol.mjs';
@@ -13,15 +14,15 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 
-export class Hub extends Sessions {
+export class Hub {
   constructor({ endpoint = hubEndpoint(), directory = stateDirectory(), appFactory } = {}) {
-    super(directory);
+    this.directory = directory;
     this.endpoint = endpoint;
     this.clients = new Set();
-    this.app = appFactory ? appFactory(this) : new AppServer(
-      (method, params) => this.notification(method, params),
-      error => { console.error(error.message); void this.stop(); },
-    );
+    const onNotification = (method, params) => this.sessions.notification(method, params);
+    const onExit = error => { console.error(error.message); void this.stop(); };
+    this.app = appFactory ? appFactory({ onNotification, onExit }) : new AppServer(onNotification, onExit);
+    this.sessions = new Sessions({ store: new Store(directory), app: this.app, onEvent: event => this.broadcast(event) });
   }
   lock() {
     fs.mkdirSync(path.join(this.directory, 'sessions'), { recursive: true, mode: 0o700 });
@@ -47,7 +48,7 @@ export class Hub extends Sessions {
   async start() {
     this.lock();
     try {
-      this.load();
+      this.sessions.load();
       this.server = net.createServer(socket => this.accept(socket));
       if (process.platform !== 'win32' && fs.existsSync(this.endpoint)) {
         const live = await new Promise((resolve, reject) => {
@@ -65,34 +66,18 @@ export class Hub extends Sessions {
       });
       this.bound = true;
       if (process.platform !== 'win32') fs.chmodSync(this.endpoint, 0o600);
-      this.ready = this.initialize();
+      this.ready = this.sessions.start();
       await this.ready;
       fs.writeFileSync(this.lockPath, JSON.stringify({ pid: process.pid, endpoint: this.endpoint, appServerPid: this.app.proc?.pid ?? null }));
       this.server.on('error', error => { console.error(error); void this.stop(); });
       return this;
     } catch (error) { await this.stop(); throw error; }
   }
-  async initialize() {
-    await this.app.start();
-    try {
-      const models = [];
-      let cursor;
-      do {
-        const page = await this.app.request('model/list', { includeHidden: true, ...(cursor ? { cursor } : {}) }, { timeoutMs: 5000, fatal: false });
-        if (!Array.isArray(page.data)) return;
-        models.push(...page.data);
-        cursor = page.nextCursor;
-      } while (cursor);
-      if (models.length) this.models = models;
-    } catch { /* Discovery is optional; Codex remains the authority. */ }
-  }
-  emit(id, payload) {
-    const event = super.emit(id, payload);
+  broadcast(event) {
     for (const client of this.clients) {
       if (client.replaying) client.backlog.push(event);
       else if (client.subscribed) this.write(client, { event });
     }
-    return event;
   }
   hello(client, p) {
     if (p.protocol !== PROTOCOL) throw fault('PROTOCOL_MISMATCH', 'Protocol mismatch; run codex-hub hub restart when idle.');
@@ -109,20 +94,20 @@ export class Hub extends Sessions {
     if (!client.identity && method !== 'hub.stop') throw fault('OWNER_REQUIRED', 'Send hello before making requests.');
     await this.ready;
     if (this.stopping) throw fault('HUB_STOPPING', 'Hub is stopping');
-    const session = p.id === undefined ? undefined : this.resolve(p.id);
-    if (entry.mutation && session) return this.mutate(session, p, client, entry.handler);
-    if (session) await this.queues.get(session.id)?.catch(() => {});
+    const session = p.id === undefined ? undefined : this.sessions.resolve(p.id);
+    if (entry.mutation && session) return this.sessions.mutate(session, p, client.identity, () => entry.handler(this, p, client, session));
+    if (session) await this.sessions.settled(session.id);
     return entry.handler(this, p, client, session);
   }
   subscribe(client, p) {
-    const sessions = this.list();
-    const events = p.replay ? sessions.flatMap(s => this.events(s.id, 0, p.replay)).sort((a, b) => a.seq - b.seq) : [];
+    const sessions = this.sessions.list();
+    const events = p.replay ? sessions.flatMap(s => this.sessions.events(s.id, 0, p.replay)).sort((a, b) => a.seq - b.seq) : [];
     client.replaying = true; client.subscribed = true;
     setImmediate(() => {
       for (const event of [...events, ...client.backlog]) this.write(client, { event });
       client.backlog = []; client.replaying = false;
     });
-    return { sessions, seq: this.seq };
+    return { sessions, seq: this.sessions.seq };
   }
   write(client, value) {
     if (client.socket.destroyed) return;
@@ -131,10 +116,11 @@ export class Hub extends Sessions {
     client.socket.write(JSON.stringify(value) + '\n');
   }
   accept(socket) {
-    const client = { socket, identity: null, subscribed: false, replaying: false, backlog: [] };
+    const abort = new AbortController();
+    const client = { socket, signal: abort.signal, identity: null, subscribed: false, replaying: false, backlog: [] };
     this.clients.add(client);
     socket.on('error', () => {});
-    socket.on('close', () => this.clients.delete(client));
+    socket.on('close', () => { abort.abort(); this.clients.delete(client); });
     const reader = readline.createInterface({ input: socket });
     reader.on('error', () => {});
     reader.on('line', row => {
@@ -145,7 +131,7 @@ export class Hub extends Sessions {
       Promise.resolve().then(async () => {
         if (!message || typeof message !== 'object' || Array.isArray(message)) throw fault('INVALID_PARAMS', 'request must be an object');
         this.write(client, { id, result: await this.dispatch(client, method, params) });
-      }).catch(error => this.write(client, { id: id ?? null, error: { ...error, code: error.code ?? 'CODEX_ERROR', message: error.message } }));
+      }).catch(error => this.write(client, { id: id ?? null, error: { ...error, code: error.code ?? 'INTERNAL', message: error.message } }));
     });
   }
   stop() {
@@ -153,12 +139,7 @@ export class Hub extends Sessions {
     this.stopping = true;
     this.stopPromise = (async () => {
       const serverClosed = this.bound ? new Promise(resolve => this.server.close(resolve)) : Promise.resolve();
-      await this.app.close();
-      await Promise.allSettled([...this.queues.values()]);
-      for (const session of this.sessions.values()) {
-        if (session.status === 'running') this.finish(session, { status: 'interrupted', error: { message: 'Hub stopped' } });
-      }
-      if (this.ownsLock && this.loaded) { this.flush(); this.persist(); }
+      await this.sessions.stop();
       // Let pending wait RPCs send terminal session snapshots before ending sockets.
       await new Promise(resolve => setImmediate(resolve));
       for (const client of this.clients) client.socket.end();

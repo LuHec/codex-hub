@@ -7,7 +7,7 @@ import { Hub } from '../src/server.mjs';
 import { HubClient } from '../src/client.mjs';
 
 class FakeApp {
-  constructor(hub) { this.hub = hub; this.calls = []; this.number = 0; }
+  constructor({ onNotification }) { this.notify = onNotification; this.calls = []; this.number = 0; }
   async start() {}
   async close() {}
   async request(method, params) {
@@ -15,15 +15,15 @@ class FakeApp {
     if (method === 'thread/start') return { thread: { id: `thread-${++this.number}` } };
     if (method === 'turn/start') {
       const turn = { id: `turn-${this.calls.length}`, status: 'inProgress' };
-      this.hub.notification('turn/started', { threadId: params.threadId, turn });
+      this.notify('turn/started', { threadId: params.threadId, turn });
       return { turn };
     }
     if (method === 'turn/interrupt') this.complete(params.threadId, 'interrupted');
     return {};
   }
   complete(id, status = 'completed') {
-    this.hub.notification('item/completed', { threadId: id, item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: 'Finished' } });
-    this.hub.notification('turn/completed', { threadId: id, turn: { id: this.hub.runtime.get(id).turnId, status } });
+    this.notify('item/completed', { threadId: id, item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: 'Finished' } });
+    this.notify('turn/completed', { threadId: id, turn: { status } });
   }
 }
 
@@ -56,14 +56,14 @@ test('wire contract, owners, concurrent wait/steer, events, replay, recovery and
   const steer = hub.app.calls.find(c => c.method === 'turn/steer');
   assert.ok(steer.params.expectedTurnId);
   assert.equal((await b.request('session.wait', { id: two.id, timeoutMs: 5 })).status, 'running');
-  hub.notification('item/agentMessage/delta', { threadId: one.id, itemId: 'answer', delta: '你' });
-  hub.notification('item/reasoning/summaryTextDelta', { threadId: one.id, itemId: 'r', delta: 'Plan' });
-  hub.notification('turn/plan/updated', { threadId: one.id, plan: [{ step: 'Do it', status: 'completed' }] });
-  hub.notification('item/started', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello' } });
-  hub.notification('item/completed', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello', exitCode: 0 } });
-  hub.notification('item/completed', { threadId: one.id, item: { type: 'fileChange', id: 'patch', status: 'completed', changes: [{ path: 'example.txt' }] } });
-  hub.notification('item/completed', { threadId: one.id, item: { type: 'imageGeneration', id: 'img', savedPath: '/tmp/image.png' } });
-  hub.notification('error', { threadId: one.id, error: { message: 'Retrying' }, willRetry: true });
+  hub.sessions.notification('item/agentMessage/delta', { threadId: one.id, itemId: 'answer', delta: '你' });
+  hub.sessions.notification('item/reasoning/summaryTextDelta', { threadId: one.id, itemId: 'r', delta: 'Plan' });
+  hub.sessions.notification('turn/plan/updated', { threadId: one.id, plan: [{ step: 'Do it', status: 'completed' }] });
+  hub.sessions.notification('item/started', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello' } });
+  hub.sessions.notification('item/completed', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello', exitCode: 0 } });
+  hub.sessions.notification('item/completed', { threadId: one.id, item: { type: 'fileChange', id: 'patch', status: 'completed', changes: [{ path: 'example.txt' }] } });
+  hub.sessions.notification('item/completed', { threadId: one.id, item: { type: 'imageGeneration', id: 'img', savedPath: '/tmp/image.png' } });
+  hub.sessions.notification('error', { threadId: one.id, error: { message: 'Retrying' }, willRetry: true });
   assert.equal((await a.request('session.get', { id: one.id })).status, 'running');
   hub.app.complete(one.id);
   assert.equal((await waiting).lastMessage, 'Finished');
@@ -90,9 +90,9 @@ test('wire contract, owners, concurrent wait/steer, events, replay, recovery and
   await a.request('session.archive', { id: one.id });
   assert.equal((await a.request('session.list')).length, 1);
   assert.equal((await a.request('session.get', { id: one.id })).title, 'Renamed');
-  const oldSeq = hub.seq;
+  const oldSeq = hub.sessions.seq;
   clients.forEach(c => c.close()); await hub.stop();
-  assert.equal(hub.sessions.get(two.id).status, 'interrupted');
+  assert.equal(hub.sessions.resolve(two.id).status, 'interrupted');
   hub = build(); await hub.start();
   const c = await connect('C');
   assert.equal((await c.request('session.get', { id: two.id })).status, 'idle');
@@ -102,7 +102,7 @@ test('wire contract, owners, concurrent wait/steer, events, replay, recovery and
   assert.equal((await readAfterSend).status, 'running');
   assert.equal(continued.effort, 'low');
   assert.ok(hub.app.calls.some(c => c.method === 'thread/resume'));
-  assert.ok(hub.seq > oldSeq);
+  assert.ok(hub.sessions.seq > oldSeq);
   await c.request('session.interrupt', { id: two.id });
   assert.equal((await c.request('session.wait', { id: two.id })).status, 'interrupted');
   assert.equal((await c.request('session.list')).length, 1);
@@ -121,10 +121,10 @@ test('crash recovery uses journal, trims partial row, preserves global sequence'
     status: 'running', createdAt: 1, turnStartedAt: 2, lastActivityAt: 3, lastLine: '', plan: [], turns: 0, lastMessage: null };
   fs.writeFileSync(path.join(directory, 'sessions/lost.jsonl'), JSON.stringify({ seq: 999, ts: 3, sessionId: 'lost', kind: 'session.updated', session }) + '\n{"broken');
   const hub = new Hub({ directory, appFactory: h => new FakeApp(h) });
-  hub.load();
-  assert.equal(hub.sessions.get('lost').status, 'interrupted');
-  assert.ok(hub.seq > 999);
-  assert.equal(hub.events('lost').at(-1).kind, 'turn.completed');
+  hub.sessions.load();
+  assert.equal(hub.sessions.resolve('lost').status, 'interrupted');
+  assert.ok(hub.sessions.seq > 999);
+  assert.equal(hub.sessions.events('lost').at(-1).kind, 'turn.completed');
 });
 
 test('journal keeps settled text, not deltas or snapshots', async t => {
@@ -137,20 +137,20 @@ test('journal keeps settled text, not deltas or snapshots', async t => {
   t.after(() => client.close());
   await client.connect();
   const { id } = await client.request('session.create', { cwd: directory, prompt: 'go' });
-  for (let i = 0; i < 200; i++) hub.notification('item/agentMessage/delta', { threadId: id, itemId: 'm', delta: `w${i} ` });
-  hub.notification('item/reasoning/summaryTextDelta', { threadId: id, itemId: 'r', delta: 'think' });
-  const journal = () => fs.readFileSync(hub.eventPath(id), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  for (let i = 0; i < 200; i++) hub.sessions.notification('item/agentMessage/delta', { threadId: id, itemId: 'm', delta: `w${i} ` });
+  hub.sessions.notification('item/reasoning/summaryTextDelta', { threadId: id, itemId: 'r', delta: 'think' });
+  const journal = () => fs.readFileSync(hub.sessions.store.eventPath(id), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
   // Mid-turn: a late viewer still gets the partial text, but nothing transient is on disk.
-  assert.equal(hub.events(id).filter(e => e.kind === 'message.delta').length, 200);
+  assert.equal(hub.sessions.events(id).filter(e => e.kind === 'message.delta').length, 200);
   assert.ok(journal().every(e => !['message.delta', 'reasoning.delta', 'session.updated'].includes(e.kind)));
   // Interrupted mid-message: the streamed text is settled into *.done events.
   await client.request('session.interrupt', { id });
   const done = journal().filter(e => e.kind.endsWith('.done'));
   assert.ok(done.some(e => e.kind === 'message.done' && e.itemId === 'm' && e.text.startsWith('w0 w1') && e.text.includes('w199')));
   assert.ok(done.some(e => e.kind === 'reasoning.done' && e.text === 'think'));
-  assert.equal(hub.events(id).filter(e => e.kind.endsWith('.delta')).length, 0);
+  assert.equal(hub.sessions.events(id).filter(e => e.kind.endsWith('.delta')).length, 0);
   await client.request('session.archive', { id });
-  assert.equal(hub.sessions.get(id).archived, true);
+  assert.equal(hub.sessions.resolve(id).archived, true);
 });
 
 test('old journals remain unchanged and state.json snapshots win', async () => {
@@ -169,8 +169,8 @@ test('old journals remain unchanged and state.json snapshots win', async () => {
   ];
   fs.writeFileSync(path.join(directory, 'sessions/old.jsonl'), rows.map(r => JSON.stringify(r) + '\n').join(''));
   const hub = new Hub({ directory, endpoint: 'unused', appFactory: h => new FakeApp(h) });
-  hub.load();
-  assert.equal(hub.sessions.get('old').title, 'new title');
+  hub.sessions.load();
+  assert.equal(hub.sessions.resolve('old').title, 'new title');
   assert.equal(fs.readFileSync(path.join(directory, 'sessions/old.jsonl'), 'utf8'), rows.map(r => JSON.stringify(r) + '\n').join(''));
   fs.rmSync(directory, { recursive: true, force: true });
 });

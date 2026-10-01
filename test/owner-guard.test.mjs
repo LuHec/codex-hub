@@ -21,7 +21,7 @@ const methods = {
 };
 
 class FakeApp {
-  constructor(hub) { this.hub = hub; this.calls = []; this.number = 0; }
+  constructor({ onNotification }) { this.notify = onNotification; this.calls = []; this.number = 0; }
   async start() {}
   async close() {}
   async request(method, params) {
@@ -31,15 +31,15 @@ class FakeApp {
     if (method === 'thread/start') return { thread: { id: `thread-${++this.number}` } };
     if (method === 'turn/start') {
       const turn = { id: `turn-${this.calls.length}`, status: 'inProgress' };
-      this.hub.notification('turn/started', { threadId: params.threadId, turn });
+      this.notify('turn/started', { threadId: params.threadId, turn });
       return { turn };
     }
     if (method === 'turn/interrupt') this.complete(params.threadId, 'interrupted');
     return {};
   }
   complete(id, status = 'completed') {
-    this.hub.notification('turn/completed', { threadId: id,
-      turn: { id: this.hub.runtime.get(id).turnId, status } });
+    this.notify('turn/completed', { threadId: id,
+      turn: { status } });
   }
 }
 
@@ -73,7 +73,7 @@ test('both harnesses are blocked on all six mutations; same harness and reads re
     [a, b, owner('alpha:a'), owner('beta:b')], [b, a, owner('beta:b'), owner('alpha:a')],
   ]) {
     const s = await create(creator);
-    const before = structuredClone(hub.sessions.get(s.id));
+    const before = structuredClone(hub.sessions.resolve(s.id));
     const calls = hub.app.calls.length;
     for (const [method, params] of Object.entries(methods)) {
       await assert.rejects(caller.request(method, { id: s.id, ...params }), error => {
@@ -87,7 +87,7 @@ test('both harnesses are blocked on all six mutations; same harness and reads re
         return true;
       });
     }
-    assert.deepEqual(hub.sessions.get(s.id), before);
+    assert.deepEqual(hub.sessions.resolve(s.id), before);
     assert.deepEqual(hub.app.calls.length, calls);
     assert.deepEqual((await caller.request('session.get', { id: s.id })).owner, expectedOwner);
     assert.deepEqual((await caller.request('session.wait', { id: s.id, timeoutMs: 0 })).status, 'running');
@@ -118,7 +118,7 @@ test('force transfers after every successful mutation, persists, broadcasts, and
     const s = await create(a);
     if (method === 'session.send') hub.app.complete(s.id);
     const result = await b.request(method, { id: s.id, ...params, force: true });
-    assert.deepEqual(hub.sessions.get(s.id).owner, owner('beta:b'));
+    assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('beta:b'));
     if (result.id) assert.deepEqual(result.owner, owner('beta:b'));
     const state = JSON.parse(fs.readFileSync(path.join(directory, 'state.json'), 'utf8'));
     assert.deepEqual(state.sessions.find(row => row.id === s.id).owner, owner('beta:b'));
@@ -142,20 +142,20 @@ test('force does not bypass validation, running-turn rules, app failures, or tra
     ['session.steer', { text: '' }],
   ]) {
     await assert.rejects(b.request(method, { id: s.id, ...params, force: true }));
-    assert.deepEqual(hub.sessions.get(s.id).owner, owner('alpha:a'));
+    assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('alpha:a'));
   }
   await assert.rejects(b.request('session.rename', { id: s.id, title: 'wrong force type', force: 'true' }), { code: 'INVALID_PARAMS' });
   hub.app.failMethod = 'turn/steer';
   await assert.rejects(b.request('session.steer', { id: s.id, text: 'rejected', force: true }), /app rejected/);
-  assert.deepEqual(hub.sessions.get(s.id).owner, owner('alpha:a'));
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('alpha:a'));
   hub.app.complete(s.id);
   await b.request('session.interrupt', { id: s.id, force: true });
-  assert.deepEqual(hub.sessions.get(s.id).owner, owner('alpha:a'));
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('alpha:a'));
   await assert.rejects(b.request('session.steer', { id: s.id, text: 'late', force: true }), /not running/);
   await assert.rejects(b.request('session.send', { id: s.id, prompt: '', force: true }), /nonempty/);
   hub.app.failMethod = 'turn/start';
   await assert.rejects(b.request('session.send', { id: s.id, prompt: 'rejected', force: true }), /app rejected/);
-  assert.deepEqual(hub.sessions.get(s.id).owner, owner('alpha:a'));
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('alpha:a'));
 });
 
 test('TUI bypasses all six gates and preserves owner, with or without an inherited owner', async t => {
@@ -167,7 +167,7 @@ test('TUI bypasses all six gates and preserves owner, with or without an inherit
       const s = await create(a);
       if (method === 'session.send') hub.app.complete(s.id);
       await tui.request(method, { id: s.id, ...params });
-      assert.deepEqual(hub.sessions.get(s.id).owner, owner('alpha:a'));
+      assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('alpha:a'));
     }
   }
 });
@@ -178,12 +178,12 @@ test('ownerless sessions are adopted only after a successful non-TUI mutation', 
   const b = await connect(owner('beta:b'));
   const s = await create(tui);
   await tui.request('session.rename', { id: s.id, title: 'human change' });
-  assert.deepEqual(hub.sessions.get(s.id).owner, null);
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, null);
   await assert.rejects(b.request('session.send', { id: s.id, prompt: 'busy' }), /already running/);
-  assert.deepEqual(hub.sessions.get(s.id).owner, null);
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, null);
   hub.app.complete(s.id);
   await b.request('session.interrupt', { id: s.id });
-  assert.deepEqual(hub.sessions.get(s.id).owner, null);
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, null);
   assert.deepEqual((await b.request('session.configure', { id: s.id, effort: 'low' })).owner, owner('beta:b'));
 });
 
@@ -226,13 +226,13 @@ test('queued mutations check the owner after the preceding force operation commi
   };
   const takeover = b.request('session.steer', { id: s.id, text: 'take over', force: true });
   await started;
-  assert.deepEqual(hub.sessions.get(s.id).owner, owner('alpha:a'));
+  assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('alpha:a'));
   const queued = assert.rejects(hub.dispatch([...hub.clients].find(c => sameOwner(c.identity?.owner, owner('alpha:a'))),
     'session.rename', { id: s.id, title: 'stale check' }), { code: 'OWNER_MISMATCH' });
   release();
   await takeover;
   await queued;
-  assert.deepEqual(hub.sessions.get(s.id).title, s.title);
+  assert.deepEqual(hub.sessions.resolve(s.id).title, s.title);
 });
 
 function runNode(args, env) {
@@ -278,7 +278,7 @@ test('CLI force and JSON errors use only the isolated test hub; strict environme
     await a.request('session.rename', { id: s.id, title: 'reset', force: true });
     const forced = await runNode([cli, command, s.id, ...rest, '--force', '--json'], env);
     assert.deepEqual(forced.code, 0, forced.stderr);
-    assert.deepEqual(hub.sessions.get(s.id).owner, owner('beta:b'));
+    assert.deepEqual(hub.sessions.resolve(s.id).owner, owner('beta:b'));
   }
 });
 

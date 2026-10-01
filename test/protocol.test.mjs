@@ -7,7 +7,7 @@ import net from 'node:net';
 import readline from 'node:readline';
 import { Hub } from '../src/server.mjs';
 import { HubClient } from '../src/client.mjs';
-import { methods, validate } from '../src/protocol.mjs';
+import { methods, validate, fault } from '../src/protocol.mjs';
 import { translate } from '../src/translate.mjs';
 import { AppServer } from '../src/codex.mjs';
 
@@ -25,7 +25,7 @@ async function fixture(t, discovery = catalog) {
       if (method === 'model/list') { if (discovery instanceof Error) throw discovery; return { data: discovery }; }
       if (method === 'thread/start') return { thread: { id: `thread-${++number}` } };
       if (method === 'turn/start') return { turn: { id: `turn-${number}` } };
-      throw new Error('app failure');
+      throw fault('CODEX_ERROR', 'app failure');
     },
   }) });
   const client = new HubClient({ endpoint, autoStart: false, owner: { harness: 'test', id: 'a:b' } });
@@ -87,7 +87,7 @@ test('catalog validates model and effort once at startup; codes distinguish sess
   await assert.rejects(client.request('no.such.method'), { code: 'NOT_FOUND' });
   await assert.rejects(client.request('session.send', { id: s.id, prompt: 'busy' }), { code: 'BUSY' });
   await assert.rejects(client.request('session.steer', { id: s.id, text: 'x' }), { code: 'CODEX_ERROR', message: 'app failure' });
-  hub.finish(hub.resolve(s.id), { status: 'completed' });
+  hub.sessions.finish(hub.sessions.resolve(s.id), { status: 'completed' });
   await assert.rejects(client.request('session.steer', { id: s.id, text: 'x' }), { code: 'NOT_RUNNING' });
   await assert.rejects(client.request('session.configure', { id: s.id, effort: 'wrong' }), { code: 'INVALID_PARAMS' });
   const changed = await client.request('session.configure', { id: s.id, model: 'other-model' });
@@ -97,11 +97,20 @@ test('catalog validates model and effort once at startup; codes distinguish sess
   await assert.rejects(client.request('session.list'), { code: 'HUB_STOPPING' });
 });
 
+test('unexpected handler failures are INTERNAL, not CODEX_ERROR', async t => {
+  const { hub, client, directory } = await fixture(t);
+  const session = await client.request('session.create', { cwd: directory, prompt: 'p' });
+  hub.sessions.rename = () => { throw new TypeError('internal bug'); };
+  await assert.rejects(client.request('session.rename', { id: session.id, title: 'x' }),
+    { code: 'INTERNAL', message: 'internal bug' });
+  assert.equal((await client.request('session.get', { id: session.id })).id, session.id);
+});
+
 test('failed discovery passes through model and effort', async t => {
   const { hub, client, directory, calls } = await fixture(t, new Error('catalog unavailable'));
   const s = await client.request('session.create', { cwd: directory, prompt: 'p', model: 'future-model', effort: 'future-effort' });
   assert.equal(s.model, 'future-model'); assert.equal(s.effort, 'future-effort');
-  hub.finish(hub.resolve(s.id), { status: 'completed' });
+  hub.sessions.finish(hub.sessions.resolve(s.id), { status: 'completed' });
   const next = await client.request('session.send', { id: s.id, prompt: 'p', model: 'another-model' });
   assert.equal(next.effort, null);
   assert.equal(calls.at(-1).params.effort, null);
@@ -128,8 +137,8 @@ test('catalog pagination is fetched only during startup', async t => {
     assert.equal(method, 'model/list'); pages.push(p);
     return p.cursor ? { data: [catalog[1]], nextCursor: null } : { data: [catalog[0]], nextCursor: 'page-2' };
   };
-  await hub.initialize();
-  assert.deepEqual(hub.models, catalog);
+  await hub.sessions.start();
+  assert.deepEqual(hub.sessions.models, catalog);
   assert.deepEqual(pages, [{ includeHidden: true }, { includeHidden: true, cursor: 'page-2' }]);
 });
 

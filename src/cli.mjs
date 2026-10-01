@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import { parseArgs } from 'node:util';
+import { fault } from './protocol.mjs';
 import { HubClient } from './client.mjs';
 import { controllerOwner, ownerLabel } from './config.mjs';
 
@@ -36,10 +37,10 @@ export async function main(args = process.argv.slice(2)) {
   const [command, id, ...rest] = words;
   if (!command || flags.help) { console.log(help); return; }
   if (command === 'tui') { await import('./tui/index.mjs'); return; }
-  if (!['new', 'send', 'steer', 'stop', 'ls', 'show', 'wait', 'config', 'rename', 'archive', 'hub'].includes(command)) throw new Error(help);
-  if (command === 'hub' && !['status', 'stop', 'restart'].includes(id)) throw new Error('Use hub status, hub stop or hub restart');
+  if (!['new', 'send', 'steer', 'stop', 'ls', 'show', 'wait', 'config', 'rename', 'archive', 'hub'].includes(command)) throw fault('INVALID_PARAMS', help);
+  if (command === 'hub' && !['status', 'stop', 'restart'].includes(id)) throw fault('INVALID_PARAMS', 'Use hub status, hub stop or hub restart');
   const owner = controllerOwner();
-  if (flags.mine && !owner) throw new Error('--mine requires CODEX_HUB_OWNER');
+  if (flags.mine && !owner) throw fault('INVALID_PARAMS', '--mine requires CODEX_HUB_OWNER');
   const client = new HubClient({ client: 'cli', owner, autoStart: command !== 'hub', allowProtocolMismatch: command === 'hub' && id === 'restart' });
   try {
     try { await client.connect(); }
@@ -66,9 +67,9 @@ export async function main(args = process.argv.slice(2)) {
     }
     const prompt = () => {
       const positional = (command === 'new' ? words.slice(1) : rest).join(' ');
-      if (flags['prompt-file'] && positional) throw new Error('Use either --prompt-file or a positional prompt');
+      if (flags['prompt-file'] && positional) throw fault('INVALID_PARAMS', 'Use either --prompt-file or a positional prompt');
       const text = flags['prompt-file'] ? fs.readFileSync(flags['prompt-file'], 'utf8') : positional;
-      if (!text.trim()) throw new Error('A nonempty prompt is required');
+      if (!text.trim()) throw fault('INVALID_PARAMS', 'A nonempty prompt is required');
       return text;
     };
     const request = (method, params) => client.request(method, params);
@@ -77,7 +78,7 @@ export async function main(args = process.argv.slice(2)) {
     let result;
     if (command === 'hub') result = id === 'status' ? client.hello : await request('hub.stop');
     if (command === 'new') {
-      if (!flags.cwd) throw new Error('new requires --cwd');
+      if (!flags.cwd) throw fault('INVALID_PARAMS', 'new requires --cwd');
       result = await request('session.create', { cwd: flags.cwd, prompt: prompt(), model: flags.model, effort: flags.effort, title: flags.title, dirs: flags.dir, network: flags.network, sandbox: sandbox() });
     }
     if (command === 'send') result = await mutate('session.send', { id, prompt: prompt(), model: flags.model, effort: flags.effort });
@@ -107,6 +108,6 @@ export async function main(args = process.argv.slice(2)) {
 }
 
 main().catch(error => {
-  console.error(jsonOutput ? JSON.stringify({ error: { ...error, code: error.code ?? 'INVALID_PARAMS', message: error.message } }) : error.message);
+  console.error(jsonOutput ? JSON.stringify({ error: { ...error, code: error.code ?? 'INTERNAL', message: error.message } }) : error.message);
   process.exitCode = 1;
 });

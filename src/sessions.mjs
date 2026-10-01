@@ -1,4 +1,3 @@
-import { Store } from './store.mjs';
 import { fault, directory } from './protocol.mjs';
 import { sameOwner, ownerLabel } from './config.mjs';
 import { translate } from './translate.mjs';
@@ -15,16 +14,25 @@ const threadSandbox = session => ({
   sandbox: session.sandbox ?? 'danger-full-access',
   config: { sandbox_workspace_write: { writable_roots: session.dirs ?? [], network_access: !!session.network } },
 });
-export class Sessions extends Store {
-  constructor(directory) {
-    super(directory);
+export class Sessions {
+  constructor({ store, app, onEvent }) {
+    this.store = store;
+    this.app = app;
+    this.onEvent = onEvent;
+    this.records = new Map();
+    this.archived = new Set();
+    this.seq = 0;
     this.runtime = new Map();
     this.queues = new Map();
     this.waiters = new Map();
   }
   load() {
-    super.load();
-    for (const session of this.sessions.values()) {
+    const state = this.store.load();
+    this.records = new Map(state.sessions.map(s => [s.id, s]));
+    this.archived = new Set(state.archived);
+    this.seq = state.seq;
+    this.loaded = true;
+    for (const session of this.records.values()) {
       this.runtime.set(session.id, { resumed: false, turnId: null, finalMessage: null, live: [] });
       if (session.status === 'running') {
         this.update(session, { status: 'interrupted', turnStartedAt: null, lastLine: 'Hub restarted; turn interrupted' });
@@ -35,10 +43,37 @@ export class Sessions extends Store {
     }
     this.persist();
   }
+  async start() {
+    await this.app.start();
+    try {
+      const models = [];
+      let cursor;
+      do {
+        const page = await this.app.request('model/list', { includeHidden: true, ...(cursor ? { cursor } : {}) }, { timeoutMs: 5000, fatal: false });
+        if (!Array.isArray(page.data)) return;
+        models.push(...page.data);
+        cursor = page.nextCursor;
+      } while (cursor);
+      if (models.length) this.models = models;
+    } catch { /* Discovery is optional; Codex remains the authority. */ }
+  }
+  persist() { this.store.persist({ seq: this.seq, sessions: [...this.records.values()], archived: [...this.archived] }); }
+  settled(id) { return this.queues.get(id)?.catch(() => {}); }
+  async stop() {
+    this.stopping = true;
+    await this.app.close();
+    await Promise.allSettled([...this.queues.values()]);
+    for (const session of this.records.values()) {
+      if (session.status === 'running') this.finish(session, { status: 'interrupted', error: { message: 'Hub stopped' } });
+    }
+    if (this.loaded) { this.flush(); this.persist(); }
+    this.stopped = true;
+  }
   emit(id, payload) {
     const event = { seq: ++this.seq, ts: Date.now(), sessionId: id, ...copy(payload) };
-    if (!TRANSIENT.has(event.kind)) this.append(event);
+    if (!TRANSIENT.has(event.kind)) this.store.append(event);
     else if (event.kind.endsWith('.delta')) this.runtime.get(id)?.live.push(event);
+    this.onEvent(event);
     return event;
   }
   update(session, patch) {
@@ -57,18 +92,18 @@ export class Sessions extends Store {
     clearTimeout(this.flushTimer);
     this.flushTimer = null;
     if (!this.dirty?.size || this.stopped) return;
-    for (const id of this.dirty) this.emit(id, { kind: 'session.updated', session: this.sessions.get(id) });
+    for (const id of this.dirty) this.emit(id, { kind: 'session.updated', session: this.records.get(id) });
     this.dirty.clear();
     this.persist();
   }
   resolve(id) {
-    if (this.sessions.has(id)) return this.sessions.get(id);
-    const matches = [...this.sessions.values()].filter(s => s.id.startsWith(id));
+    if (this.records.has(id)) return this.records.get(id);
+    const matches = [...this.records.values()].filter(s => s.id.startsWith(id));
     if (matches.length !== 1) throw fault(matches.length ? 'AMBIGUOUS_ID' : 'NOT_FOUND', matches.length ? `Ambiguous session prefix: ${id}` : `Unknown session: ${id}`);
     return matches[0];
   }
   list(owner) {
-    return [...this.sessions.values()].filter(s => !this.archived.has(s.id) && (owner === undefined || sameOwner(s.owner, owner)))
+    return [...this.records.values()].filter(s => !this.archived.has(s.id) && (owner === undefined || sameOwner(s.owner, owner)))
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt || b.createdAt - a.createdAt).map(copy);
   }
   // Replace an item's in-memory deltas with one journaled *.done event.
@@ -81,7 +116,7 @@ export class Sessions extends Store {
   }
   events(id, afterSeq = 0, limit) {
     // Journal plus the running turn's unsettled deltas, so a late viewer sees partial text.
-    const events = [...this.history(id), ...(this.runtime.get(id)?.live ?? [])]
+    const events = [...this.store.history(id), ...(this.runtime.get(id)?.live ?? [])]
       .filter(e => e.seq > afterSeq).sort((a, b) => a.seq - b.seq);
     // With a cursor, page forward. Without a cursor, fetch the latest N for the UI.
     return limit === undefined ? events : limit === 0 ? [] : afterSeq > 0 ? events.slice(0, limit) : events.slice(-limit);
@@ -150,7 +185,7 @@ export class Sessions extends Store {
   }
   notification(method, p) {
     if (method === 'thread/closed') return this.closing?.get(p.threadId)?.();
-    const session = this.sessions.get(p.threadId);
+    const session = this.records.get(p.threadId);
     if (!session || this.stopped) return;
     const runtime = this.runtime.get(session.id);
     if (method === 'turn/started') { runtime.turnId = p.turn.id; return; }
@@ -173,19 +208,19 @@ export class Sessions extends Store {
     }
   }
 
-  wait(session, timeoutMs, client) {
-    if (session.status !== 'running' || timeoutMs === 0) return Promise.resolve(copy(session));
+  wait(session, timeoutMs, signal) {
+    if (session.status !== 'running' || timeoutMs === 0 || signal.aborted) return Promise.resolve(copy(session));
     return new Promise(resolve => {
       let timer;
       const set = this.waiters.get(session.id) || new Set();
       this.waiters.set(session.id, set);
       const done = () => {
-        clearTimeout(timer); set.delete(done); client.socket.off('close', done);
+        clearTimeout(timer); set.delete(done); signal.removeEventListener('abort', done);
         if (!set.size) this.waiters.delete(session.id);
         resolve(copy(session));
       };
       set.add(done);
-      client.socket.once('close', done);
+      signal.addEventListener('abort', done, { once: true });
       if (timeoutMs !== undefined) timer = setTimeout(done, Math.min(timeoutMs, 2_147_483_647));
     });
   }
@@ -200,8 +235,8 @@ export class Sessions extends Store {
     }
     return { model, effort };
   }
-  async create(p, client) {
-    const owner = this.mutationOwner(client);
+  async create(p, identity) {
+    const owner = this.mutationOwner(identity);
     const cwd = directory(p.cwd, 'cwd');
     const prompt = p.prompt;
     const { model, effort } = this.settings(p);
@@ -211,14 +246,14 @@ export class Sessions extends Store {
     const session = { id: result.thread.id, title: p.title ?? prompt.split(/\r?\n/)[0].slice(0, 100), cwd, model: model ?? result.model ?? null, effort: effort ?? result.reasoningEffort ?? null,
       owner, ...access, status: 'idle', createdAt: now, turnStartedAt: null, lastActivityAt: now,
       lastLine: '', plan: [], turns: 0, lastMessage: null };
-    this.sessions.set(session.id, session);
+    this.records.set(session.id, session);
     this.runtime.set(session.id, { resumed: true, turnId: null, finalMessage: null, live: [] });
     this.emit(session.id, { kind: 'session.created', session }); this.persist();
     return this.serialize(session.id, () => this.startTurn(session, { prompt }, owner));
   }
-  mutationOwner(client, session, force) {
-    if (client.identity?.client === 'tui') return session?.owner ?? client.identity.owner ?? null;
-    const caller = client.identity?.owner;
+  mutationOwner(identity, session, force) {
+    if (identity?.client === 'tui') return session?.owner ?? identity.owner ?? null;
+    const caller = identity?.owner;
     const details = { sessionId: session?.id ?? null, title: session?.title ?? null, owner: session?.owner ?? null, caller: caller ?? null };
     if (!caller) throw fault('OWNER_REQUIRED', 'Set CODEX_HUB_OWNER=harness:id before modifying sessions.', details);
     if (session?.owner && session.owner.harness !== caller.harness && !force) {
@@ -228,12 +263,12 @@ export class Sessions extends Store {
     }
     return !session?.owner || force ? caller : session.owner;
   }
-  mutate(session, p, client, handler) {
+  mutate(session, p, identity, handler) {
     return this.serialize(session.id, async () => {
-      const owner = this.mutationOwner(client, session, p.force);
-      const result = await handler(this, p, client, session);
-      if (result !== false && client.identity.client !== 'tui' && !sameOwner(owner, session.owner)) this.update(session, { owner });
-      return result?.id === session.id ? copy(session) : result === false ? {} : result;
+      const owner = this.mutationOwner(identity, session, p.force);
+      const result = await handler();
+      if (result?.transferOwnership !== false && identity.client !== 'tui' && !sameOwner(owner, session.owner)) this.update(session, { owner });
+      return result?.id === session.id ? copy(session) : result?.transferOwnership === false ? result.result : result;
     });
   }
   async steer(session, p, callerOwner) {
@@ -244,7 +279,7 @@ export class Sessions extends Store {
     return {};
   }
   async interrupt(session) {
-    if (session.status !== 'running') return false;
+    if (session.status !== 'running') return { result: {}, transferOwnership: false };
     await this.app.request('turn/interrupt', { threadId: session.id, turnId: this.runtime.get(session.id).turnId });
     return {};
   }

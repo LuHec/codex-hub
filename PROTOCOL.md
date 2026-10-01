@@ -49,7 +49,8 @@ absolute paths. Unknown methods return `NOT_FOUND`.
 | `OWNER_MISMATCH` | Another harness owns the session; intentional takeover needs force |
 | `PROTOCOL_MISMATCH` | Client/server protocol differs |
 | `HUB_STOPPING` | Shutdown has begun |
-| `CODEX_ERROR` | App-server request/process failure, preserving its message |
+| `CODEX_ERROR` | App-server request/process failure, tagged by the Codex adapter |
+| `INTERNAL` | Unexpected hub failure (including programming errors), preserving its message |
 
 Ownership errors also carry `sessionId`, `title`, `owner` and `caller`; absent
 values are null. `owner` and `caller` are objects, never display strings.
@@ -147,8 +148,11 @@ Session = {
 Events live in `sessions/<id>.jsonl`. The storage loader migrates v1 owners once:
 `a:b` becomes `{harness:"a", id:"b"}`; a bare legacy ID becomes
 `{harness:"claude", id:<ID>}` (the sole historical compatibility assumption);
-null stays null. Subsequent loads retain v2 objects. Historical journal owners
-are converted when read; journals are not compacted or rewritten. A torn final
+null stays null. Subsequent loads retain v2 objects. Legacy journal owner/by strings
+are rewritten to objects once during load, using atomic file replacement. This
+also covers v2 states with journals left by the earlier read-time migration.
+Already migrated journals are left untouched; events are never compacted.
+History reads perform no migration. A torn final
 journal row is truncated. Newer journal snapshots recover sessions missing from
 or newer than state.json; global event sequence never goes backwards.
 

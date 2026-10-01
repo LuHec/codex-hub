@@ -20,17 +20,18 @@ export class AppServer {
     this.stderr = '';
     this.proc.stderr.setEncoding('utf8').on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-8192); });
     this.exited = new Promise(resolve => { this.resolveExit = resolve; });
-    this.proc.on('error', error => { this.resolveExit(); this.fail(error); });
+    this.proc.on('error', error => { this.resolveExit(); this.fail(fault('CODEX_ERROR', error.message)); });
     this.proc.on('exit', (code, signal) => {
       this.resolveExit();
-      this.fail(new Error(`codex app-server exited (${signal || code}) ${this.stderr.trim()}`));
+      this.fail(fault('CODEX_ERROR', `codex app-server exited (${signal || code}) ${this.stderr.trim()}`));
     });
-    this.proc.stdin.on('error', error => this.fail(error));
+    this.proc.stdin.on('error', error => this.fail(fault('CODEX_ERROR', error.message)));
     this.lines = readline.createInterface({ input: this.proc.stdout });
-    this.lines.on('error', error => this.fail(error));
+    this.lines.on('error', error => this.fail(fault('CODEX_ERROR', error.message)));
     this.lines.on('line', line => {
       try {
-        const msg = JSON.parse(line);
+        let msg;
+        try { msg = JSON.parse(line); } catch (error) { throw fault('CODEX_ERROR', error.message); }
         if (msg.method && msg.id !== undefined) {
           this.write({ id: msg.id, error: { code: -32601, message: `Unsupported server request: ${msg.method}` } });
         } else if (msg.id !== undefined) {
@@ -68,7 +69,7 @@ export class AppServer {
   }
   fail(error) {
     if (this.dead) return;
-    error = fault('CODEX_ERROR', error.message);
+    error = error.code ? error : fault('INTERNAL', error.message);
     this.dead = error;
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
     this.pending.clear();
@@ -100,9 +101,9 @@ export class AppServer {
     };
     if (!await waitForExit(1500)) {
       this.proc.kill('SIGKILL');
-      if (!await waitForExit(1500)) throw new Error(`Could not stop app-server pid ${this.proc.pid}`);
+      if (!await waitForExit(1500)) throw fault('CODEX_ERROR', `Could not stop app-server pid ${this.proc.pid}`);
     }
-    this.fail(new Error('app-server stopped'));
+    this.fail(fault('CODEX_ERROR', 'app-server stopped'));
     this.lines?.close();
   }
 }
