@@ -4,11 +4,22 @@ A standalone local service for multiple harnesses to drive Codex through one
 `codex app-server`. Node.js 22+, an authenticated Codex installation, no npm
 dependencies. Private package, installed locally; never published.
 
-From the repository root:
-
 ```sh
-npm install -g ./packages/codex-hub
+npm install -g <path to this repository>
 ```
+
+## Integrating a harness
+
+codex-hub is the only official piece; each harness writes its own thin adapter.
+An adapter does two things and needs no code:
+
+1. Set `CODEX_HUB_OWNER=<harness>:<conversation id>` in the agent's environment,
+   e.g. from a session-start hook. `<harness>` is a lowercase name of your choosing.
+2. Teach the agent to use the hub: point it at `codex-hub guide` (the
+   [shared guide](GUIDE.md) on working with Codex and the commands), plus anything
+   specific to your harness.
+
+Depend only on the CLI and [PROTOCOL.md](PROTOCOL.md); see its compatibility promise.
 
 Set `CODEX_HUB_OWNER=harness:conversation-id` in the controller's environment.
 PowerShell: `$env:CODEX_HUB_OWNER = 'myharness:conversation-1'`.
@@ -36,7 +47,7 @@ can operate on any session without changing its owner. This gate prevents
 accidents; it is not authentication.
 
 Ordinary commands auto-start the server from this package. `hub status` and
-`hub stop` never start one. `node packages/codex-hub/src/server.mjs` runs it in the
+`hub stop` never start one. `node src/server.mjs` runs it in the
 foreground. Binary selection: `CODEX_BIN`, newest Windows desktop Codex binary,
 then `codex` on PATH. `CODEX_BIN` is an unquoted executable path without arguments.
 
@@ -68,11 +79,11 @@ The full contract is [PROTOCOL.md](PROTOCOL.md).
 
 ## Development and verification
 
-`npm test` from the repo root runs unit/integration tests with fake Codex processes.
-`npm run test:smoke --prefix packages/codex-hub` exercises real inference, all basic
+`npm test` runs unit/integration tests with fake Codex processes.
+`npm run test:smoke` exercises real inference, all basic
 CLI commands and the TUI, using the dedicated Windows pipe
 `\\.\pipe\codex-hub-standalone-test` and a temporary home. It saves report.json and
 tui.ansi in the printed temp directory and stops its hub/app-server afterward.
-`npm run test:live --prefix packages/codex-hub` additionally tests two simultaneous
+`npm run test:live` additionally tests two simultaneous
 controllers, steering and file-producing turns. Run live tests separately; they
 share the dedicated test pipe on Windows. Neither invokes a global hub command.

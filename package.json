@@ -22,6 +22,7 @@
   "files": [
     "src/",
     "PROTOCOL.md",
+    "GUIDE.md",
     "README.md",
     "LICENSE",
     "NOTICE"

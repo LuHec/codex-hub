@@ -3,6 +3,15 @@
 One local service owns one `codex app-server`. Independent harnesses and TUIs share
 its sessions. The package has no harness discovery or integration dependencies.
 
+## Compatibility promise
+
+Harnesses depend only on this protocol and on the `codex-hub` CLI (its commands,
+flags and `--json` output), never on this package's source. Within one protocol
+number changes are additive only: new methods, new optional params, new result or
+event fields. Clients ignore fields they don't know. Changing or removing anything
+existing bumps the protocol number, and mismatched clients get `PROTOCOL_MISMATCH`
+instead of silent misbehaviour.
+
 ## Transport and handshake
 
 - Newline-delimited JSON over a local named pipe or Unix socket.
