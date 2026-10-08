@@ -9,6 +9,29 @@ dependencies. Private package, installed locally; never published.
 npm install -g <path to this repository>
 ```
 
+## Automatic setup
+
+On a new Windows computer, authenticate GitHub CLI for access to this private
+repository, then run:
+
+```powershell
+gh repo clone LuHec/codex-hub
+cd codex-hub
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer installs Node.js LTS through winget if Node.js 22+ is missing,
+installs the global Hub, installs its own pinned DSH runtime, and configures the
+ACP profile with DeepSeek and Z.ai. Existing `~/.dsh/.credentials.yaml` is referenced
+using this computer's path. No keys are copied or included in the repository.
+Existing profile settings are preserved; running the installer again is supported.
+If there are no existing credentials, set `DEEPSEEK_API_KEY` and/or `ZAI_API_KEY`
+in the launching environment before starting the Hub.
+
+With Node.js already installed, `codex-hub setup` (or `npm run setup` in the repository) configures DSH on Windows, macOS
+and Linux. It installs DSH under `~/.codex-hub/dsh/runtime`; `DSH_BIN` still overrides
+runtime selection. Restart an existing Hub when idle after setup.
+
 ## Integrating a harness
 
 codex-hub is the only official piece; each harness writes its own thin adapter.
@@ -59,7 +82,8 @@ Wait can run in a harness's background shell while another connection steers it.
 
 ## DSH sessions
 
-Install DSH separately (`0.1.5-rc.1` tested). The hub launches `dsh --profile acp`;
+Run the automatic installer or `npm run setup` (`DSH 0.1.5-rc.1` tested).
+The hub launches its installed DSH runtime with `--profile acp`;
 `DSH_BIN` can name an executable, `.cmd`, or the CLI's `lib/bin.js` file.
 Set `DEEPSEEK_API_KEY` in the hub's launch environment, or configure credentials
 in its DSH home: `<CODEX_HUB_HOME>/dsh` (normally `~/.codex-hub/dsh`).

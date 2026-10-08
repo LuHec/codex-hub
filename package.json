@@ -15,6 +15,7 @@
   },
   "scripts": {
     "start": "node src/server.mjs",
+    "setup": "node src/setup.mjs",
     "test": "node --test test/*.test.mjs",
     "test:live": "node test/live.mjs",
     "test:smoke": "node test/smoke.mjs",
@@ -22,6 +23,7 @@
   },
   "files": [
     "src/",
+    "install.ps1",
     "PROTOCOL.md",
     "GUIDE.md",
     "README.md",

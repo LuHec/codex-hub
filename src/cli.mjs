@@ -13,7 +13,7 @@ codex-hub wait <id> [--timeout seconds]
 codex-hub config <id> [--model m] [--effort e] [--dir d]... [--network | --no-network] [--full-access | --no-full-access]
                   (applies from the next turn; --dir replaces the list)
 codex-hub rename <id> "title" | archive <id>
-codex-hub hub status | hub stop | hub restart | tui | guide
+codex-hub hub status | hub stop | hub restart | tui | guide | setup
 All commands support --json (errors are JSON on stderr).
 send / steer / stop / config / rename / archive support --force to take over after success.
 Owner: CODEX_HUB_OWNER=harness:id.`;
@@ -37,6 +37,7 @@ export async function main(args = process.argv.slice(2)) {
   const [command, id, ...rest] = words;
   if (flags.backend !== undefined && command !== 'new') throw fault('INVALID_PARAMS', '--backend is only used when creating a session');
   if (!command || flags.help) { console.log(help); return; }
+  if (command === 'setup') { const { setup } = await import('./setup.mjs'); setup(); return; }
   if (command === 'tui') { await import('./tui/index.mjs'); return; }
   if (command === 'guide') { process.stdout.write(fs.readFileSync(new URL('../GUIDE.md', import.meta.url), 'utf8')); return; }
   if (!['new', 'send', 'steer', 'stop', 'ls', 'show', 'wait', 'config', 'rename', 'archive', 'hub'].includes(command)) throw fault('INVALID_PARAMS', help);

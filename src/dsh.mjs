@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fault } from './protocol.mjs';
 import { VERSION } from './config.mjs';
 
@@ -21,7 +22,8 @@ export class Dsh {
     this.home = home;
     this.onEvent = onEvent;
     this.onExit = onExit;
-    this.command = command;
+    const bundled = path.join(home, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+    this.command = command === 'dsh' && !process.env.DSH_BIN && fs.existsSync(bundled) ? bundled : command;
     this.pending = new Map();
     this.sessions = new Map();
     this.nextId = 1;
