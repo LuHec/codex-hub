@@ -12,7 +12,7 @@ export class Store {
     this.directory = directory;
   }
   statePath() { return path.join(this.directory, 'state.json'); }
-  eventPath(id) { return path.join(this.directory, 'sessions', `${id}.jsonl`); }
+  eventPath(id) { return path.join(this.directory, 'sessions', `${encodeURIComponent(id)}.jsonl`); }
   persist(state) {
     const target = this.statePath();
     fs.writeFileSync(`${target}.tmp`, JSON.stringify({ version: 2, ...state }, null, 2), { mode: 0o600 });

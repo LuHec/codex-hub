@@ -1,4 +1,5 @@
 import path from "node:path";
+import { describeTool, summarizeTools } from "./tools.mjs";
 import { renderMarkdown } from "./md.mjs";
 import { BOLD, ITALIC, RESET, bg, fg, truncate, width, wrap } from "./text.mjs";
 
@@ -14,6 +15,7 @@ export const C = {
   selBg: bg("#232A36")
 };
 export const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+export const backendName = s => s?.dsh ? "DSH" : "Codex";
 const EFFORT = { low: "lo", medium: "md", high: "hi", xhigh: "xh", max: "max", minimal: "min" };
 
 // Full model id; the effort is abbreviated in the compact list and spelled out elsewhere.
@@ -68,7 +70,7 @@ export function plain(text) {
     .replace(/`([^`]+)`/g, "$1");
 }
 
-const TOOL_TYPES = new Set(["command", "files", "image", "reasoning"]);
+const TOOL_TYPES = new Set(["command", "files", "image", "reasoning", "tool"]);
 
 // Absolute column jump. Borders and right-aligned text are placed with this instead of
 // space padding, so a glyph the terminal draws wider or narrower than expected (CJK,
@@ -107,7 +109,7 @@ function listBody(ui, sessions, x, w, h, now) {
     const right1 = `${modelTag(s)} ${ago(since).padStart(3)}`;
     const title = truncate(s.title || s.id, inner - 4 - width(right1) - 1);
     const l1 = `${lead}${glyph(s, ui.tick)} ${sel ? BOLD : ""}${C.text}${title}${RESET}${sel ? C.selBg : ""}`;
-    const right2 = ownerTag(s.owner);
+    const right2 = `${backendName(s)} · ${ownerTag(s.owner)}`;
     const sub = truncate(plain(s.lastLine) || (s.status === "running" ? "working…" : ""), inner - 4 - width(right2) - 1);
     const l2 = `${lead} ${C.muted}  ${sub}`;
     const fill = sel ? `${at(left)}${C.selBg}${" ".repeat(inner)}${at(left)}` : "";
@@ -119,7 +121,8 @@ function listBody(ui, sessions, x, w, h, now) {
 }
 
 // One collapsed line for a run of tool activity, like controller's folded tool calls.
-function toolSummary(group, w, tick) {
+function toolSummary(group, w, tick, cwd) {
+  const generic = summarizeTools(group, cwd);
   const commands = group.filter((b) => b.type === "command");
   const running = commands.find((b) => b.exitCode === undefined);
   const failed = commands.filter((b) => b.exitCode !== undefined && b.exitCode !== 0).length;
@@ -129,17 +132,17 @@ function toolSummary(group, w, tick) {
     const more = commands.length - 1;
     return `  ${C.run}${SPIN[tick % SPIN.length]} ${C.muted}${truncate(cleanCommand(running.command), w - 12)}${C.faint}${more ? `  +${more}` : ""}${RESET}`;
   }
-  const parts = [];
+  const parts = [...generic.parts];
   if (commands.length) parts.push(`${C.muted}${commands.length} command${commands.length > 1 ? "s" : ""}${failed ? `${C.faint}, ${C.bad}${failed} failed` : ""}`);
   if (files.length) parts.push(`${C.muted}edited ${truncate(files.join(", "), Math.max(10, w - 40))}`);
   if (images) parts.push(`${C.steer}${images} image${images > 1 ? "s" : ""}`);
   if (!parts.length) return null; // reasoning only: hidden while collapsed
-  return `  ${C.faint}⋯ ${parts.join(`${C.faint} · `)}${RESET}`;
+  return `  ${C.faint}⋯ ${truncate(parts.join(`${C.faint} · `), w - 5)}${RESET}`;
 }
 
 const PROMPT_PREVIEW = 6;
 
-function streamLines(blocks, w, tick, expanded) {
+function streamLines(blocks, w, tick, expanded, cwd) {
   const out = [];
   out.toggles = new Set(); // line indexes that expand/collapse on click
   const md = (text, prefix, base) => out.push(...renderMarkdown(text, w, { prefix, base }));
@@ -159,10 +162,14 @@ function streamLines(blocks, w, tick, expanded) {
   for (const b of rows) {
     switch (b.type) {
       case "group": {
-        const line = toolSummary(b.items, w, tick);
+        const line = toolSummary(b.items, w, tick, cwd);
         if (line) {
           out.toggles.add(out.length);
           out.push(line);
+        }
+        const generic = summarizeTools(b.items, cwd);
+        for (const t of [...generic.running.slice(-2), ...generic.failed.slice(-3)]) {
+          hang('    ', t.failed ? C.bad : C.run, [t.name, t.args, t.summary].filter(Boolean).join(' · '), 2);
         }
         break;
       }
@@ -199,6 +206,14 @@ function streamLines(blocks, w, tick, expanded) {
         out.push(`  ${C.faint}$ ${C.muted}${truncate(cleanCommand(b.command), w - 8)} ${status}${RESET}`);
         break;
       }
+      case "tool": {
+        const t = describeTool(b, cwd);
+        const color = t.failed ? C.bad : t.running ? C.run : C.ok;
+        out.push(`  ${color}● ${C.text}${truncate(t.name + (t.args ? ' (' + t.args + ')' : ''), w - 4)}${RESET}`);
+        const body = t.category === 'plan' ? t.summary : t.body || t.summary;
+        if (body) hang("    ", t.failed ? C.bad : C.muted, body, 8);
+        break;
+      }
       case "files":
         out.push(`  ${C.faint}✎ ${C.muted}${truncate([...b.paths].map((p) => path.basename(p)).join("  "), w - 4)}${RESET}`);
         break;
@@ -231,7 +246,7 @@ function detailBody(ui, s, blocks, w, h) {
   const inner = w - 2;
   const head = [];
   head.push(` ${BOLD}${C.text}${truncate(s.title || s.id, inner - 2)}${RESET}`);
-  const meta = [modelTag(s, true), `owner ${ownerTag(s.owner)}`, `${s.turns ?? 0} turns`, s.cwd ? truncate(s.cwd, 40) : ""].filter(Boolean);
+  const meta = [backendName(s), modelTag(s, true), `owner ${ownerTag(s.owner)}`, `${s.turns ?? 0} turns`, s.cwd ? truncate(s.cwd, 40) : ""].filter(Boolean);
   head.push(` ${C.muted}${truncate(meta.join("   "), inner - 2)}${RESET}`);
   if (s.plan?.length) {
     head.push("");
@@ -245,7 +260,7 @@ function detailBody(ui, s, blocks, w, h) {
   }
   head.push(`${C.faint}${"─".repeat(inner)}${RESET}`);
 
-  const raw = streamLines(blocks, inner - 2, ui.tick, ui.expanded);
+  const raw = streamLines(blocks, inner - 2, ui.tick, ui.expanded, s.cwd);
   const stream = raw.map((l) => ` ${l}`);
   const room = Math.max(1, h - 2 - head.length);
   const maxScroll = Math.max(0, stream.length - room);
@@ -273,10 +288,11 @@ function header(model, ui, sessions, cols, now) {
   return `${left}${at(cols - width(right) + 1)}${right}`;
 }
 
-function footer(ui, cols) {
+function footer(ui, cols, session) {
   if (ui.input) {
-    const label = ` ${ui.input.kind === "steer" ? "steer" : "send"} ▸ `;
-    const hint = "  enter ok · esc cancel";
+    const labels = { "new-backend": "new: codex / dsh", "new-cwd": "workspace", "new-prompt": "task", steer: "steer", send: "send" };
+    const label = ` ${labels[ui.input.kind] ?? "send"} ▸ `;
+    const hint = ui.flash ? `  ${ui.flash.text}` : ui.input.pending ? "  starting…" : "  enter ok · ctrl+u clear · esc cancel";
     // Show the tail of long input so the caret stays visible.
     const room = Math.max(10, cols - width(label) - width(hint) - 2);
     let text = ui.input.text;
@@ -290,8 +306,9 @@ function footer(ui, cols) {
   const keys = [
     ["↑↓", "select"],
     ["enter", "focus"],
+    ["n", "new"],
     ["ctrl+o", ui.expanded ? "collapse" : "expand"],
-    ["s", "steer"],
+    ...(!session?.dsh ? [["s", "steer"]] : []),
     ["m", "message"],
     ["p", "model"],
     ["esc", "stop"],
@@ -338,7 +355,7 @@ export function render(model, ui, cols, rows) {
     );
     body = left.map((l, i) => l + right[i]);
   }
-  const frame = [header(model, ui, sessions, cols, now), ...body, footer(ui, cols)];
+  const frame = [header(model, ui, sessions, cols, now), ...body, footer(ui, cols, current)];
   if (ui.picker) drawPicker(frame, ui, current, cols, rows);
   return frame;
 }
@@ -349,7 +366,7 @@ export function drawPicker(frame, ui, session, cols, rows) {
   const models = p.models;
   const efforts = models[p.mi].efforts;
   const hint = "←→ column · ↑↓ choose · enter apply · esc";
-  const lw = Math.max(14, ...models.map((m) => width(m.slug))) + 5;
+  const lw = Math.max(14, ...models.map((m) => width(m.label ?? m.slug))) + 5;
   const rw = Math.max(9, ...efforts.map((e) => width(e))) + 5;
   const w = Math.min(cols - 2, Math.max(lw + rw + 3, width(hint) + 4));
   const listH = Math.max(models.length, efforts.length);
@@ -368,14 +385,15 @@ export function drawPicker(frame, ui, session, cols, rows) {
     if (active) return `${C.accent}›${mark}${C.text}${text}${RESET}`;
     return ` ${mark}${C.muted}${text}${RESET}`;
   };
-  const title = truncate(` Model · ${session?.title ?? ""} `, w - 4);
+  const title = truncate(` ${backendName(session)} model · ${session?.title ?? ""} `, w - 4);
   row(0, `${at(x)}${b}╭─${BOLD}${C.text}${title}${RESET}${b}${"─".repeat(Math.max(0, w - 3 - width(title)))}╮${RESET}`);
   row(1, `${at(x)}${b}│${at(x + 1)}${" ".repeat(w - 2)}${at(x + 2)}${C.faint}model${at(x + lw + 2)}effort${RESET}${at(x + w - 1)}${b}│${RESET}`);
   for (let i = 0; i < listH; i++) {
     const m = models[i];
     const e = efforts[i];
-    const left = m ? cell(m.slug, i === p.mi, p.col === 0, m.slug === session?.model, lw) : "";
-    const right = e ? cell(e, i === p.ei, p.col === 1, e === session?.effort && models[p.mi].slug === session?.model, rw) : "";
+    const selected = session?.modelValue ?? session?.model;
+    const left = m ? cell(m.label ?? m.slug, i === p.mi, p.col === 0, m.slug === selected, lw) : "";
+    const right = e ? cell(e, i === p.ei, p.col === 1, e === session?.effort && models[p.mi].slug === selected, rw) : "";
     row(2 + i, `${at(x)}${b}│${at(x + 1)}${" ".repeat(w - 2)}${at(x + 1)}${left}${at(x + lw + 1)}${C.faint}│${RESET}${at(x + lw + 2)}${right}${at(x + w - 1)}${b}│${RESET}`);
   }
   row(2 + listH, `${at(x)}${b}│${at(x + 1)}${" ".repeat(w - 2)}${RESET}${at(x + w - 1)}${b}│${RESET}`);

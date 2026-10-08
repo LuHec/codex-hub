@@ -36,7 +36,7 @@ async function fixture(t, discovery = catalog) {
 
 test('every method declares a strict spec, mutation flag and handler', () => {
   const sample = { protocol: 1, client: 'cli', owner: { harness: 'test', id: 'a' }, cwd: '.', prompt: 'p', title: 't',
-    model: 'm', effort: 'e', dirs: ['.'], network: true, sandbox: 'workspace-write', id: 'id', force: true,
+    model: 'm', effort: 'e', backend: 'dsh', dirs: ['.'], network: true, sandbox: 'workspace-write', id: 'id', force: true,
     afterSeq: 0, limit: 1, timeoutMs: 0, replay: 0, text: 't' };
   assert.equal(Object.keys(methods).length, 14);
   for (const entry of Object.values(methods)) {
@@ -137,8 +137,8 @@ test('catalog pagination is fetched only during startup', async t => {
     assert.equal(method, 'model/list'); pages.push(p);
     return p.cursor ? { data: [catalog[1]], nextCursor: null } : { data: [catalog[0]], nextCursor: 'page-2' };
   };
-  await hub.sessions.start();
-  assert.deepEqual(hub.sessions.models, catalog);
+  await hub.codex.start();
+  assert.deepEqual(hub.codex.models, catalog);
   assert.deepEqual(pages, [{ includeHidden: true }, { includeHidden: true, cursor: 'page-2' }]);
 });
 

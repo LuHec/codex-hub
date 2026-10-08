@@ -5,6 +5,8 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { AppServer } from './codex.mjs';
+import { Codex } from './codex-backend.mjs';
+import { Dsh } from './dsh.mjs';
 import { Store } from './store.mjs';
 import { Sessions } from './sessions.mjs';
 import { hubEndpoint, stateDirectory, VERSION } from './config.mjs';
@@ -15,14 +17,25 @@ function alive(pid) {
 }
 
 export class Hub {
-  constructor({ endpoint = hubEndpoint(), directory = stateDirectory(), appFactory } = {}) {
+  constructor({ endpoint = hubEndpoint(), directory = stateDirectory(), appFactory, dshFactory } = {}) {
     this.directory = directory;
     this.endpoint = endpoint;
     this.clients = new Set();
-    const onNotification = (method, params) => this.sessions.notification(method, params);
-    const onExit = error => { console.error(error.message); void this.stop(); };
+    const onEvent = (id, event) => this.sessions.event(id, event);
+    const onNotification = (method, params) => this.codex.notification(method, params);
+    const onExit = error => {
+      this.sessions.backendFailed('codex', error);
+      void this.codex.close().catch(error => console.error(error.message));
+    };
     this.app = appFactory ? appFactory({ onNotification, onExit }) : new AppServer(onNotification, onExit);
-    this.sessions = new Sessions({ store: new Store(directory), app: this.app, onEvent: event => this.broadcast(event) });
+    this.codex = new Codex({ app: this.app, onEvent });
+    const dshOptions = { directory, onEvent,
+      onExit: error => {
+        this.sessions.backendFailed('dsh', error);
+        void this.dsh.close().catch(error => console.error(error.message));
+      } };
+    this.dsh = dshFactory ? dshFactory(dshOptions) : new Dsh(dshOptions);
+    this.sessions = new Sessions({ store: new Store(directory), codex: this.codex, dsh: this.dsh, onEvent: event => this.broadcast(event) });
   }
   lock() {
     fs.mkdirSync(path.join(this.directory, 'sessions'), { recursive: true, mode: 0o700 });
@@ -66,18 +79,24 @@ export class Hub {
       });
       this.bound = true;
       if (process.platform !== 'win32') fs.chmodSync(this.endpoint, 0o600);
-      this.ready = this.sessions.start();
+      // Each backend starts on its first session; a DSH task does not require Codex.
+      this.ready = Promise.resolve();
       await this.ready;
-      fs.writeFileSync(this.lockPath, JSON.stringify({ pid: process.pid, endpoint: this.endpoint, appServerPid: this.app.proc?.pid ?? null }));
+      this.writeLock();
       this.server.on('error', error => { console.error(error); void this.stop(); });
       return this;
     } catch (error) { await this.stop(); throw error; }
   }
   broadcast(event) {
+    if (event.kind === 'session.created') this.writeLock();
     for (const client of this.clients) {
       if (client.replaying) client.backlog.push(event);
       else if (client.subscribed) this.write(client, { event });
     }
+  }
+  writeLock() {
+    if (this.ownsLock) fs.writeFileSync(this.lockPath, JSON.stringify({ pid: process.pid, endpoint: this.endpoint,
+      appServerPid: this.app.proc?.pid ?? null, dshPid: this.dsh.proc?.pid ?? null }));
   }
   hello(client, p) {
     if (p.protocol !== PROTOCOL) throw fault('PROTOCOL_MISMATCH', 'Protocol mismatch; run codex-hub hub restart when idle.');
@@ -139,16 +158,20 @@ export class Hub {
     this.stopping = true;
     this.stopPromise = (async () => {
       const serverClosed = this.bound ? new Promise(resolve => this.server.close(resolve)) : Promise.resolve();
-      await this.sessions.stop();
-      // Let pending wait RPCs send terminal session snapshots before ending sockets.
-      await new Promise(resolve => setImmediate(resolve));
-      for (const client of this.clients) client.socket.end();
-      const sockets = [...this.clients].map(c => c.socket);
-      const timer = setTimeout(() => sockets.forEach(s => s.destroy()), 200);
-      await serverClosed;
-      clearTimeout(timer);
-      if (this.ownsLock) { fs.unlinkSync(this.lockPath); this.ownsLock = false; }
-      this.stopped = true;
+      try { await this.sessions.stop(); }
+      finally {
+        // A failed backend close must not leave clients or the hub lock behind.
+        await new Promise(resolve => setImmediate(resolve));
+        const sockets = [...this.clients].map(c => c.socket);
+        for (const socket of sockets) socket.end();
+        const timer = setTimeout(() => sockets.forEach(s => s.destroy()), 200);
+        try { await serverClosed; }
+        finally {
+          clearTimeout(timer);
+          try { if (this.ownsLock) fs.unlinkSync(this.lockPath); }
+          finally { this.ownsLock = false; this.stopped = true; }
+        }
+      }
     })();
     return this.stopPromise;
   }

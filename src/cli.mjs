@@ -5,7 +5,7 @@ import { fault } from './protocol.mjs';
 import { HubClient } from './client.mjs';
 import { controllerOwner, ownerLabel } from './config.mjs';
 
-const help = `codex-hub new --cwd <dir> [--dir <extra writable dir>]... [--network] [--full-access] [--model m] [--effort e] [--title t] (--prompt-file f | "prompt")
+const help = `codex-hub new --cwd <dir> [--backend codex|dsh] [--dir <extra writable dir>]... [--network] [--full-access] [--model m] [--effort e] [--title t] (--prompt-file f | "prompt")
 codex-hub send <id> (--prompt-file f | "prompt")
 codex-hub steer <id> "text" | stop <id>
 codex-hub ls [--mine] | show <id> [--events N]
@@ -21,20 +21,21 @@ Owner: CODEX_HUB_OWNER=harness:id.`;
 let jsonOutput = false;
 
 function display(session) {
-  return `${session.id}  ${session.status}  ${session.title}\n  ${session.model}/${session.effort}  owner=${ownerLabel(session.owner)}  turns=${session.turns}${session.dirs?.length ? `  +dirs ${session.dirs.join(', ')}` : ''}${session.network ? '  network' : ''}${session.sandbox === 'danger-full-access' ? '  FULL ACCESS' : ''}\n  ${session.lastLine}`;
+  return `${session.id}  ${session.dsh ? 'DSH' : 'Codex'}  ${session.status}  ${session.title}\n  ${session.model}/${session.effort}  owner=${ownerLabel(session.owner)}  turns=${session.turns}${session.dirs?.length ? `  +dirs ${session.dirs.join(', ')}` : ''}${session.network ? '  network' : ''}${session.sandbox === 'danger-full-access' ? '  FULL ACCESS' : ''}\n  ${session.lastLine}`;
 }
 export async function main(args = process.argv.slice(2)) {
   // Preserve JSON error output even when strict argument parsing itself fails.
   const endOptions = args.indexOf('--');
   jsonOutput = args.slice(0, endOptions < 0 ? args.length : endOptions).includes('--json');
   const { values: flags, positionals: words } = parseArgs({ args, allowPositionals: true, options: {
-    cwd: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' }, title: { type: 'string' },
+    cwd: { type: 'string' }, backend: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' }, title: { type: 'string' },
     'prompt-file': { type: 'string' }, events: { type: 'string' }, timeout: { type: 'string' },
     dir: { type: 'string', multiple: true }, network: { type: 'boolean' }, 'full-access': { type: 'boolean' },
     mine: { type: 'boolean' }, force: { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   }, allowNegative: true });
   jsonOutput = flags.json === true;
   const [command, id, ...rest] = words;
+  if (flags.backend !== undefined && command !== 'new') throw fault('INVALID_PARAMS', '--backend is only used when creating a session');
   if (!command || flags.help) { console.log(help); return; }
   if (command === 'tui') { await import('./tui/index.mjs'); return; }
   if (command === 'guide') { process.stdout.write(fs.readFileSync(new URL('../GUIDE.md', import.meta.url), 'utf8')); return; }
@@ -80,7 +81,7 @@ export async function main(args = process.argv.slice(2)) {
     if (command === 'hub') result = id === 'status' ? client.hello : await request('hub.stop');
     if (command === 'new') {
       if (!flags.cwd) throw fault('INVALID_PARAMS', 'new requires --cwd');
-      result = await request('session.create', { cwd: flags.cwd, prompt: prompt(), model: flags.model, effort: flags.effort, title: flags.title, dirs: flags.dir, network: flags.network, sandbox: sandbox() });
+      result = await request('session.create', { cwd: flags.cwd, backend: flags.backend, prompt: prompt(), model: flags.model, effort: flags.effort, title: flags.title, dirs: flags.dir, network: flags.network, sandbox: sandbox() });
     }
     if (command === 'send') result = await mutate('session.send', { id, prompt: prompt(), model: flags.model, effort: flags.effort });
     if (command === 'steer') result = await mutate('session.steer', { id, text: rest.join(' ') });

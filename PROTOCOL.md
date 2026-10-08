@@ -1,7 +1,8 @@
 # codex-hub protocol 1
 
-One local service owns one `codex app-server`. Independent harnesses and TUIs share
-its sessions. The package has no harness discovery or integration dependencies.
+One local service owns independent Codex app-server and DSH ACP processes, started
+on demand. Independent harnesses and TUIs share its session list. The package has
+no harness discovery or integration dependencies.
 
 ## Compatibility promise
 
@@ -59,6 +60,8 @@ absolute paths. Unknown methods return `NOT_FOUND`.
 | `PROTOCOL_MISMATCH` | Client/server protocol differs |
 | `HUB_STOPPING` | Shutdown has begun |
 | `CODEX_ERROR` | App-server request/process failure, tagged by the Codex adapter |
+| `DSH_ERROR` | ACP request/process failure, tagged by the DSH adapter |
+| `UNSUPPORTED` | An operation or access option is unavailable for this backend |
 | `INTERNAL` | Unexpected hub failure (including programming errors), preserving its message |
 
 Ownership errors also carry `sessionId`, `title`, `owner` and `caller`; absent
@@ -102,7 +105,7 @@ safe integers. Other params are strings except hello's owner and protocol.
 | `hello` | `{ protocol: 1, client: "cli" \| "tui", owner? }` | `{ protocol, version, pid }` |
 | `hub.stop` | `{}` | `{}` then shutdown |
 | `subscribe` | `{ replay? }` | `{ sessions: Session[], seq }` then events |
-| `session.create` | `{ cwd, prompt, title?, model?, effort?, dirs?, network?, sandbox? }` | Session, first turn started |
+| `session.create` | `{ cwd, prompt, title?, backend?: "codex" \| "dsh", model?, effort?, dirs?, network?, sandbox? }` | Session, first turn started |
 | `session.list` | `{ owner?: Owner }` | Visible Session[] by newest activity |
 | `session.get` | `{ id }` | Session, including archived |
 | `session.events` | `{ id, afterSeq?, limit? }` | Event[] |
@@ -114,13 +117,13 @@ safe integers. Other params are strings except hello's owner and protocol.
 | `session.rename` | `{ id, title, force? }` | Session |
 | `session.archive` | `{ id, force? }` | `{}`, hides session but retains files |
 
-Sandbox is `danger-full-access` (existing default) or `workspace-write` (writes
+For Codex, sandbox is `danger-full-access` (existing default) or `workspace-write` (writes
 inside cwd + dirs, network controlled by `network`, default false). Approvals are
 `never`. Configure requires at least one setting; dirs replaces the whole list.
 A sandbox change unloads/re-resumes the thread on the next send.
 
 Models and efforts come from Codex's [`model/list`](https://learn.chatgpt.com/docs/app-server#list-models-modellist),
-fetched once per startup (following pagination, including hidden models).
+fetched when Codex first starts (following pagination, including hidden models).
 Explicit values are checked against `model` and `supportedReasoningEfforts`.
 New sessions use the catalog's default model (or first model) and its default
 effort. Changing model without effort uses that model's default effort.
@@ -128,19 +131,41 @@ If discovery fails, is empty, or a page exceeds five seconds, validation passes
 through and omitted values are delegated to Codex. There is no hard-coded catalog.
 An unavailable model at inference time still produces Codex's error.
 
+DSH is selected only at creation; omitted backend means Codex. A DSH record has
+`dsh: { id, configOptions }`, where `id` is the native ACP session id and
+`configOptions` is the last advertised ACP configuration array. Its public hub id
+is `dsh:<native-id>`. Codex records have no `dsh` object and retain their native ids.
+There is no backend update operation. `model` accepts an advertised opaque ACP
+selector or its unambiguous model name; `effort` accepts an advertised value.
+DSH options come from ACP, never from the Codex catalog. Resume restores the saved
+selection before accepting the next prompt. If a multi-option configuration fails
+after the model changed, the backend restores the previous selection. If restoration
+also fails, the error reports both failures and the snapshot records ACP's actual selection.
+
+DSH rejects steer, nonempty dirs, explicit network settings and workspace-write.
+Its own execution policy applies; the hub selects `allow_once` for permission
+requests belonging to its live DSH sessions, otherwise declines unsupported requests.
+Prompt is asynchronous at the hub boundary, so wait never prevents cancellation.
+ACP `cancelled` becomes interrupted, `end_turn` completed, other stop reasons failed;
+RPC and process errors become failed turns. ACP supplies committed text and generic
+tool updates rather than raw provider tokens, shell exit codes or plan cards.
+
 ## Session state and storage v2
 
 ```ts
 Session = {
-  id: string            // Codex thread id
+  id: string            // Codex thread id, or dsh:<native-id>
+  dsh?: { id: string, configOptions: object[] } // present only on DSH records
   title: string         // short label; defaults to first line of first prompt
   cwd: string
-  dirs: string[]        // extra writable directories (absolute)
-  network: boolean      // outbound network for commands
-  sandbox: "workspace-write" | "danger-full-access"  // default danger-full-access
+  dirs?: string[]       // Codex extra writable directories (absolute)
+  network?: boolean     // Codex outbound network for commands
+  sandbox?: "workspace-write" | "danger-full-access"  // Codex default danger-full-access
   archived?: true
-  model: string | null  // effective Codex model
-  effort: string | null // effective effort, null when delegated to Codex
+  model: string | null  // effective model name
+  effort: string | null // effective effort
+  modelValue?: string | null // opaque value used by the model picker
+  modelOptions?: { slug: string, label?: string, efforts: string[], def?: string }[]
   owner: Owner | null   // null means unowned
   status: "idle" | "running" | "failed" | "interrupted"
   createdAt: number     // ms epoch
@@ -153,8 +178,14 @@ Session = {
 }
 ```
 
+The backend supplies `modelValue` and `modelOptions` as display-ready choices.
+The TUI does not read ACP configuration or the Codex model cache. Older saved
+sessions acquire these fields when loaded; backend-specific durable data remains
+in its existing record shape.
+
 `state.json` is `{ version: 2, seq, sessions, archived }`, replaced atomically.
-Events live in `sessions/<id>.jsonl`. The storage loader migrates v1 owners once:
+Events live in `sessions/<encodeURIComponent(id)>.jsonl` (Codex UUID filenames are unchanged).
+The storage loader migrates v1 owners once:
 `a:b` becomes `{harness:"a", id:"b"}`; a bare legacy ID becomes
 `{harness:"claude", id:<ID>}` (the sole historical compatibility assumption);
 null stays null. Subsequent loads retain v2 objects. Legacy journal owner/by strings
@@ -166,7 +197,7 @@ journal row is truncated. Newer journal snapshots recover sessions missing from
 or newer than state.json; global event sequence never goes backwards.
 
 Running sessions reload as interrupted; other sessions reload as idle. Turns do
-not survive restart. The next send resumes the persisted Codex thread. Sessions
+not survive restart. The next send resumes the persisted session in its own backend. Sessions
 have separate mutation queues; reads wait for preceding mutations. Wait never
 holds the mutation queue. Steer sends the current expected turn ID to Codex.
 
@@ -184,6 +215,7 @@ Event = { seq: number, ts: number, sessionId: string } & (
   | { kind: "reasoning.done", itemId: string, text: string }
   | { kind: "command.started", itemId: string, command: string }
   | { kind: "command.done", itemId: string, exitCode: number | null }
+  | { kind: "tool.updated", itemId: string, title?: string, status?: string, rawInput?: unknown, content?: object[] } // DSH generic tool lifecycle
   | { kind: "file.changed", path: string }
   | { kind: "image.generated", path: string | null }
   | { kind: "plan.updated", plan: Session["plan"] }

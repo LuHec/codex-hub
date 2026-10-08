@@ -96,6 +96,16 @@ function fold(events) {
         if (b) b.exitCode = ev.exitCode;
         break;
       }
+      case "tool.updated": {
+        const key = `tool:${ev.itemId}`;
+        let b = byItem.get(key);
+        if (!b) {
+          b = { type: "tool", itemId: ev.itemId, title: "Tool", status: "in_progress" };
+          byItem.set(key, b); blocks.push(b);
+        }
+        for (const field of ["title", "status", "rawInput", "content"]) if (ev[field] !== undefined) b[field] = ev[field];
+        break;
+      }
       case "file.changed":
         if (last?.type === "files") last.paths.add(ev.path);
         else blocks.push({ type: "files", paths: new Set([ev.path]) });

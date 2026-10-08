@@ -4,12 +4,15 @@
 import path from "node:path";
 import { renderMarkdown } from "./md.mjs";
 import { BOLD, ITALIC, RESET, bg, fg, truncate, width, wrap } from "./text.mjs";
-import { C, SPIN, at, cleanCommand, clock, drawPicker, ownerTag } from "./view.mjs";
+import { C, SPIN, at, backendName, cleanCommand, clock, drawPicker, ownerTag } from "./view.mjs";
+
+import { describeTool, summarizeTools } from "./tools.mjs";
 
 const USER_BG = bg("#2A303B");
 const CHIP = bg("#8FB8DE") + fg("#141820");
 const STAR = "·✢✳✶✻✽✻✶✳✢";
 const PROMPT_PREVIEW = 8;
+
 
 export const COMMANDS = [
   ["model", "switch model and effort"],
@@ -39,11 +42,11 @@ function logo(s, w) {
   const meta = [s.model, s.effort, s.owner ? `owner ${ownerTag(s.owner)}` : ""].filter(Boolean).join(" · ");
   return [
     "",
-    ` ${C.accent}▄▄▄▄▄▄▄▄${RESET}   ${BOLD}${C.text}Codex${RESET} ${C.muted}${truncate(s.title || s.id, w - 20)}${RESET}`,
+    ` ${C.accent}▄▄▄▄▄▄▄▄${RESET}   ${BOLD}${C.text}${backendName(s)}${RESET} ${C.muted}${truncate(s.title || s.id, w - 20)}${RESET}`,
     ` ${CHIP}${BOLD}  ›_    ${RESET}   ${C.muted}${truncate(meta, w - 13)}${RESET}`,
     ` ${C.accent}▀▀▀▀▀▀▀▀${RESET}   ${C.muted}${truncate(s.cwd ?? "", w - 13)}${RESET}`,
     "",
-    ` ${C.faint}You're talking to Codex directly · ← ← back to sessions · / for commands${RESET}`
+    ` ${C.faint}You're talking to ${backendName(s)} directly · ← ← back to sessions · / for commands${RESET}`
   ];
 }
 
@@ -53,7 +56,7 @@ function tool(out, dot, name, args, w) {
   out.push(`${dot}● ${RESET}${BOLD}${C.text}${name}${RESET}${args ? `${C.muted}(${truncate(args, w - width(name) - 4)})${RESET}` : ""}`);
 }
 
-function transcript(blocks, w, tick, expanded) {
+function transcript(blocks, w, tick, expanded, cwd) {
   const out = [];
   out.toggles = new Set();
   const result = (color, text, cap = Infinity) => {
@@ -79,7 +82,7 @@ function transcript(blocks, w, tick, expanded) {
   // Collapsed, each run of tool activity folds into one line.
   const rows = [];
   for (const b of blocks) {
-    const foldable = !expanded && ["command", "files", "image", "reasoning"].includes(b.type);
+    const foldable = !expanded && ["command", "files", "image", "reasoning", "tool"].includes(b.type);
     const last = rows[rows.length - 1];
     if (foldable && last?.type === "group") last.items.push(b);
     else rows.push(foldable ? { type: "group", items: [b] } : b);
@@ -107,10 +110,11 @@ function transcript(blocks, w, tick, expanded) {
           result(C.muted, `Running…${commands.length > 1 ? `  (+${commands.length - 1} earlier)` : ""}`);
           break;
         }
-        const failed = commands.filter((x) => x.exitCode !== 0).length;
+        const generic = summarizeTools(b.items, cwd);
+        const failed = commands.filter((x) => x.exitCode !== undefined && x.exitCode !== 0).length + generic.failed.length;
         const files = new Set(b.items.filter((x) => x.type === "files").flatMap((x) => [...x.paths]));
         const images = b.items.filter((x) => x.type === "image").length;
-        const parts = [];
+        const parts = [...generic.parts];
         if (commands.length) parts.push(`ran ${commands.length} command${commands.length > 1 ? "s" : ""}`);
         if (files.size) parts.push(`edited ${files.size} file${files.size > 1 ? "s" : ""}`);
         if (images) parts.push(`generated ${images} image${images > 1 ? "s" : ""}`);
@@ -119,9 +123,12 @@ function transcript(blocks, w, tick, expanded) {
         out.push("");
         out.toggles.add(out.length);
         out.push(
-          `${failed ? C.bad : C.ok}● ${RESET}${C.text}${text[0].toUpperCase()}${text.slice(1)}${RESET}` +
+          `${failed ? C.bad : generic.running.length ? C.run : C.ok}● ${RESET}${C.text}${truncate(text[0].toUpperCase() + text.slice(1), w - 28)}${RESET}` +
             `${failed ? ` ${C.bad}(${failed} failed)` : ""} ${C.faint}(ctrl+o to expand)${RESET}`
         );
+        for (const t of [...generic.running.slice(-2), ...generic.failed.slice(-3)]) {
+          result(t.failed ? C.bad : C.run, [t.name, t.args, t.summary].filter(Boolean).join(' · '), 2);
+        }
         break;
       }
       case "command": {
@@ -134,6 +141,13 @@ function transcript(blocks, w, tick, expanded) {
       case "files":
         tool(out, C.ok, "Update", [...b.paths].map((p) => path.basename(p)).join(", "), w);
         break;
+      case "tool": {
+        const t = describeTool(b, cwd);
+        tool(out, t.failed ? C.bad : t.running ? C.run : C.ok, t.name, t.args, w);
+        const body = t.category === 'plan' ? t.summary : t.body || t.summary;
+        if (body) result(t.failed ? C.bad : C.muted, body, 12);
+        break;
+      }
       case "image":
         tool(out, C.steer, "Image", b.path ? path.basename(b.path) : "", w);
         if (b.path) result(C.muted, b.path);
@@ -193,7 +207,7 @@ export function renderFocus(model, ui, cols, rows) {
   const inputRow = bottom.length; // index of the first input line within bottom
   inputLines.forEach((ln, i) => {
     const lead = i === 0 ? `${running ? C.steer : C.text}> ${RESET}` : "  ";
-    const hint = !text ? `${C.faint}${running ? "Steer the running turn…" : "Message Codex…"}` : "";
+    const hint = !text ? `${C.faint}${running ? (s.dsh ? "Esc to stop, then send a follow-up…" : "Steer the running turn…") : `Message ${backendName(s)}…`}` : "";
     bottom.push(`${lead}${C.text}${ln}${hint}${RESET}`);
   });
   bottom.push(`${C.faint}${"─".repeat(cols)}${RESET}`);
@@ -217,7 +231,7 @@ export function renderFocus(model, ui, cols, rows) {
   }
 
   // ---- transcript fills whatever is above ----
-  const raw = transcript(model.blocksFor(s.id), w, ui.tick, ui.expanded);
+  const raw = transcript(model.blocksFor(s.id), w, ui.tick, ui.expanded, s.cwd);
   const lines = [...logo(s, w), ...raw];
   const offset = lines.length - raw.length;
   const room = Math.max(1, rows - bottom.length);

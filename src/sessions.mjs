@@ -1,23 +1,16 @@
 import { fault, directory } from './protocol.mjs';
 import { sameOwner, ownerLabel } from './config.mjs';
-import { translate } from './translate.mjs';
 
 const copy = value => structuredClone(value);
 // Streamed to live clients but never journaled: deltas settle into one *.done event per item,
 // and session snapshots live in state.json.
 const TRANSIENT = new Set(['message.delta', 'reasoning.delta', 'session.updated']);
 const line = text => String(text).trim().split(/\r?\n/).filter(Boolean).at(-1)?.slice(0, 240) || '';
-const input = text => [{ type: 'text', text, text_elements: [] }];
-// app-server applies sandbox settings per thread (turn-level writableRoots is rejected), so they go on
-// thread/start and on every (re)resume. workspace-write: writes stay in cwd + dirs, reads are unrestricted.
-const threadSandbox = session => ({
-  sandbox: session.sandbox ?? 'danger-full-access',
-  config: { sandbox_workspace_write: { writable_roots: session.dirs ?? [], network_access: !!session.network } },
-});
 export class Sessions {
-  constructor({ store, app, onEvent }) {
+  constructor({ store, codex, dsh, onEvent }) {
     this.store = store;
-    this.app = app;
+    this.codex = codex;
+    this.dsh = dsh;
     this.onEvent = onEvent;
     this.records = new Map();
     this.archived = new Set();
@@ -25,6 +18,7 @@ export class Sessions {
     this.runtime = new Map();
     this.queues = new Map();
     this.waiters = new Map();
+    this.creating = new Set();
   }
   load() {
     const state = this.store.load();
@@ -33,7 +27,8 @@ export class Sessions {
     this.seq = state.seq;
     this.loaded = true;
     for (const session of this.records.values()) {
-      this.runtime.set(session.id, { resumed: false, turnId: null, finalMessage: null, live: [] });
+      Object.assign(session, this.backend(session).snapshot(session));
+      this.runtime.set(session.id, { finalMessage: null, live: [] });
       if (session.status === 'running') {
         this.update(session, { status: 'interrupted', turnStartedAt: null, lastLine: 'Hub restarted; turn interrupted' });
         this.emit(session.id, { kind: 'turn.completed', status: 'interrupted', error: 'Hub restarted' });
@@ -43,31 +38,21 @@ export class Sessions {
     }
     this.persist();
   }
-  async start() {
-    await this.app.start();
-    try {
-      const models = [];
-      let cursor;
-      do {
-        const page = await this.app.request('model/list', { includeHidden: true, ...(cursor ? { cursor } : {}) }, { timeoutMs: 5000, fatal: false });
-        if (!Array.isArray(page.data)) return;
-        models.push(...page.data);
-        cursor = page.nextCursor;
-      } while (cursor);
-      if (models.length) this.models = models;
-    } catch { /* Discovery is optional; Codex remains the authority. */ }
-  }
+  backend(session) { return session.dsh ? this.dsh : this.codex; }
   persist() { this.store.persist({ seq: this.seq, sessions: [...this.records.values()], archived: [...this.archived] }); }
   settled(id) { return this.queues.get(id)?.catch(() => {}); }
   async stop() {
     this.stopping = true;
-    await this.app.close();
-    await Promise.allSettled([...this.queues.values()]);
-    for (const session of this.records.values()) {
-      if (session.status === 'running') this.finish(session, { status: 'interrupted', error: { message: 'Hub stopped' } });
-    }
-    if (this.loaded) { this.flush(); this.persist(); }
-    this.stopped = true;
+    const closed = await Promise.allSettled([this.codex, this.dsh].filter(Boolean).map(backend => Promise.resolve().then(() => backend.close())));
+    await Promise.allSettled([...this.creating, ...this.queues.values()]);
+    try {
+      for (const session of this.records.values()) {
+        if (session.status === 'running') this.finish(session, { status: 'interrupted', error: { message: 'Hub stopped' } });
+      }
+      if (this.loaded) { this.flush(); this.persist(); }
+    } finally { this.stopped = true; }
+    const failed = closed.find(r => r.status === 'rejected');
+    if (failed) throw failed.reason;
   }
   emit(id, payload) {
     const event = { seq: ++this.seq, ts: Date.now(), sessionId: id, ...copy(payload) };
@@ -133,79 +118,58 @@ export class Sessions {
   }
   async startTurn(session, params, owner) {
     if (session.status === 'running') throw fault('BUSY', 'Session is already running');
-    const prompt = params.prompt;
-    params = { ...params, ...this.settings(params, session) };
+    const backend = this.backend(session);
+    const patch = await backend.prepare(copy(session), params);
+    if (this.stopping) throw fault('HUB_STOPPING', 'Hub is stopping');
     const runtime = this.runtime.get(session.id);
-    if (!runtime.resumed) {
-      if (runtime.reload) await this.unload(session.id);
-      runtime.reload = false;
-      await this.app.request('thread/resume', { threadId: session.id, cwd: session.cwd,
-        model: params.model || session.model, ...threadSandbox(session), approvalPolicy: 'never' });
-      runtime.resumed = true;
-    }
-    runtime.finalMessage = null;
-    runtime.turnId = null;
-    runtime.texts = new Map();
-    this.update(session, { status: 'running', model: params.model ?? null, effort: params.effort ?? null,
-      turnStartedAt: Date.now(), plan: [], lastLine: line(prompt) });
-    this.emit(session.id, { kind: 'turn.started', prompt, by: owner ?? null });
+    Object.assign(runtime, { finalMessage: null, texts: new Map() });
+    this.update(session, { ...patch, status: 'running', turnStartedAt: Date.now(), plan: [], lastLine: line(params.prompt) });
+    this.emit(session.id, { kind: 'turn.started', prompt: params.prompt, by: owner ?? null });
     try {
-      const result = await this.app.request('turn/start', { threadId: session.id, input: input(prompt),
-        model: session.model, effort: session.effort, approvalPolicy: 'never' });
-      if (session.status === 'running') runtime.turnId = result.turn.id;
+      await backend.run(copy(session), params.prompt);
       return copy(session);
     } catch (error) {
-      this.finish(session, { status: this.stopping ? 'interrupted' : 'failed', error: { message: error.message } });
+      this.finish(session, { status: this.stopping ? 'interrupted' : 'failed', error });
       throw error;
     }
-  }
-  // A loaded thread keeps its sandbox; unload it so the next resume applies new settings.
-  async unload(id) {
-    const closed = new Promise(resolve => (this.closing ??= new Map()).set(id, resolve));
-    try {
-      const { status } = await this.app.request('thread/unsubscribe', { threadId: id });
-      if (status === 'unsubscribed') await Promise.race([closed, new Promise(resolve => setTimeout(resolve, 5000))]);
-    } finally { this.closing.delete(id); }
   }
   finish(session, turn) {
     if (session.status !== 'running') return;
     const runtime = this.runtime.get(session.id);
-    if (runtime.turnId && turn.id && runtime.turnId !== turn.id) return;
     const status = ['completed', 'failed', 'interrupted'].includes(turn.status) ? turn.status : 'failed';
     // An interrupted item never completes; keep whatever text it streamed.
     for (const e of [...runtime.live]) if (runtime.live.includes(e)) this.settle(session, e.kind.split('.')[0], e.itemId);
-    const final = turn.items?.filter(i => i.type === 'agentMessage' && (i.phase === 'final_answer' || i.phase == null)).at(-1)?.text;
+    const final = turn.finalMessage;
     this.update(session, { status: status === 'completed' ? 'idle' : status, turnStartedAt: null,
       turns: session.turns + 1, lastMessage: final ?? runtime.finalMessage,
       lastLine: line(turn.error?.message || final || runtime.finalMessage || status) });
     this.emit(session.id, { kind: 'turn.completed', status, ...(turn.error?.message ? { error: turn.error.message } : {}) });
-    runtime.turnId = null;
     this.persist();
     for (const done of this.waiters.get(session.id) || []) done();
   }
-  notification(method, p) {
-    if (method === 'thread/closed') return this.closing?.get(p.threadId)?.();
-    const session = this.records.get(p.threadId);
+  event(id, event) {
+    const session = this.records.get(id);
     if (!session || this.stopped) return;
-    const runtime = this.runtime.get(session.id);
-    if (method === 'turn/started') { runtime.turnId = p.turn.id; return; }
-    if (p.turnId && runtime.turnId && p.turnId !== runtime.turnId) return;
-    if (method === 'turn/completed') return this.finish(session, p.turn);
-    for (const event of translate(method, p)) {
-      const { kind, itemId, text } = event;
-      if (kind.endsWith('.done') && ['message.done', 'reasoning.done'].includes(kind)) {
-        this.settle(session, kind.split('.')[0], itemId, text);
-        if (kind === 'message.done' && (p.item.phase === 'final_answer' || p.item.phase == null)) runtime.finalMessage = text;
-      } else this.emit(session.id, event);
-      if (kind.endsWith('.delta')) {
-        runtime.texts ??= new Map();
-        const partial = (runtime.texts.get(itemId) || '') + text;
-        runtime.texts.set(itemId, partial.slice(-1000));
-        this.activity(session, partial);
-      } else if (kind === 'plan.updated') this.update(session, { plan: event.plan, lastLine: line(p.explanation || 'Plan updated') });
-      else if (kind === 'command.done') this.activity(session, `Command exited ${event.exitCode ?? '?'}: ${p.item.command}`);
-      else this.activity(session, text || event.message || event.command || event.path || kind);
+    if (event.kind === 'settings.updated') { this.update(session, event.patch); return; }
+    if (event.kind === 'execution.completed') {
+      return this.finish(session, { ...event, status: this.stopping ? 'interrupted' : event.status });
     }
+    if (session.status !== 'running') return;
+    const runtime = this.runtime.get(id);
+    const { final, activity, ...payload } = event;
+    const { kind, itemId, text } = payload;
+    if (kind === 'message.done' || kind === 'reasoning.done') {
+      this.settle(session, kind.split('.')[0], itemId, text);
+      if (kind === 'message.done' && final) runtime.finalMessage = text;
+    } else this.emit(id, payload);
+    if (kind.endsWith('.delta')) {
+      runtime.texts ??= new Map();
+      const key = kind + ':' + itemId;
+      const partial = (runtime.texts.get(key) || '') + text;
+      runtime.texts.set(key, partial.slice(-1000));
+      this.activity(session, partial);
+    } else if (kind === 'plan.updated') this.update(session, { plan: event.plan, lastLine: 'Plan updated' });
+    else this.activity(session, activity || text || event.message || event.command || event.path || event.title || kind);
   }
 
   wait(session, timeoutMs, signal) {
@@ -224,32 +188,27 @@ export class Sessions {
       if (timeoutMs !== undefined) timer = setTimeout(done, Math.min(timeoutMs, 2_147_483_647));
     });
   }
-  settings(p, session) {
-    const fallback = this.models?.find(m => m.isDefault) ?? this.models?.[0];
-    const model = p.model ?? session?.model ?? fallback?.model;
-    const entry = this.models?.find(m => m.model === model);
-    if (this.models && model && !entry) throw fault('INVALID_PARAMS', `model is not offered by Codex: ${model}`);
-    const effort = p.effort ?? (p.model && p.model !== session?.model ? entry?.defaultReasoningEffort : session?.effort) ?? entry?.defaultReasoningEffort;
-    if (entry && effort && !entry.supportedReasoningEfforts.some(e => e.reasoningEffort === effort)) {
-      throw fault('INVALID_PARAMS', `effort ${effort} is not offered for model ${model}`);
-    }
-    return { model, effort };
-  }
-  async create(p, identity) {
+  create(p, identity) {
+    if (this.stopping) throw fault('HUB_STOPPING', 'Hub is stopping');
     const owner = this.mutationOwner(identity);
     const cwd = directory(p.cwd, 'cwd');
-    const prompt = p.prompt;
-    const { model, effort } = this.settings(p);
-    const access = { dirs: p.dirs?.map((d, i) => directory(d, `dirs[${i}]`)) ?? [], network: p.network === true, sandbox: p.sandbox ?? 'danger-full-access' };
-    const result = await this.app.request('thread/start', { cwd, model, approvalPolicy: 'never', ...threadSandbox(access) });
+    const task = this.createSession({ ...p, cwd }, owner);
+    this.creating.add(task);
+    task.finally(() => this.creating.delete(task)).catch(() => {});
+    return task;
+  }
+  async createSession(p, owner) {
+    const backend = p.backend === 'dsh' ? this.dsh : this.codex;
+    const record = await backend.create(p);
+    if (this.stopping) throw fault('HUB_STOPPING', 'Hub is stopping');
     const now = Date.now();
-    const session = { id: result.thread.id, title: p.title ?? prompt.split(/\r?\n/)[0].slice(0, 100), cwd, model: model ?? result.model ?? null, effort: effort ?? result.reasoningEffort ?? null,
-      owner, ...access, status: 'idle', createdAt: now, turnStartedAt: null, lastActivityAt: now,
+    const session = { ...record, title: p.title ?? p.prompt.split(/\r?\n/)[0].slice(0, 100), cwd: p.cwd,
+      owner, status: 'idle', createdAt: now, turnStartedAt: null, lastActivityAt: now,
       lastLine: '', plan: [], turns: 0, lastMessage: null };
     this.records.set(session.id, session);
-    this.runtime.set(session.id, { resumed: true, turnId: null, finalMessage: null, live: [] });
+    this.runtime.set(session.id, { finalMessage: null, live: [] });
     this.emit(session.id, { kind: 'session.created', session }); this.persist();
-    return this.serialize(session.id, () => this.startTurn(session, { prompt }, owner));
+    return this.serialize(session.id, () => this.startTurn(session, { prompt: p.prompt }, owner));
   }
   mutationOwner(identity, session, force) {
     if (identity?.client === 'tui') return session?.owner ?? identity.owner ?? null;
@@ -272,35 +231,27 @@ export class Sessions {
     });
   }
   async steer(session, p, callerOwner) {
-    const text = p.text;
     if (session.status !== 'running') throw fault('NOT_RUNNING', 'Session is not running');
-    await this.app.request('turn/steer', { threadId: session.id, expectedTurnId: this.runtime.get(session.id).turnId, input: input(text) });
-    this.emit(session.id, { kind: 'steer', text, by: callerOwner ?? null }); this.activity(session, text);
+    await this.backend(session).steer(copy(session), p.text);
+    this.emit(session.id, { kind: 'steer', text: p.text, by: callerOwner ?? null }); this.activity(session, p.text);
     return {};
   }
   async interrupt(session) {
     if (session.status !== 'running') return { result: {}, transferOwnership: false };
-    await this.app.request('turn/interrupt', { threadId: session.id, turnId: this.runtime.get(session.id).turnId });
+    await this.backend(session).interrupt(copy(session));
     return {};
   }
   rename(session, p) { this.update(session, { title: p.title }); return copy(session); }
-  configure(session, p) {
-    const patch = {};
-    const settings = this.settings(p, session);
-    if (p.model) patch.model = settings.model;
-    if (p.effort || p.model) patch.effort = settings.effort ?? null;
-    if (p.dirs !== undefined) patch.dirs = p.dirs.map((d, i) => directory(d, `dirs[${i}]`));
-    if (p.network !== undefined) patch.network = p.network === true;
-    if (p.sandbox !== undefined) patch.sandbox = p.sandbox;
-    if (!Object.keys(patch).length) throw fault('INVALID_PARAMS', 'configure needs model, effort, dirs, network or sandbox');
-    // Sandbox changes reach the thread when the next turn reloads it.
-    if (['dirs', 'network', 'sandbox'].some(k => k in patch)) {
-      const runtime = this.runtime.get(session.id);
-      runtime.reload ||= runtime.resumed;
-      runtime.resumed = false;
-    }
+  async configure(session, p) {
+    const patch = await this.backend(session).configure(copy(session), p);
     this.update(session, patch);
     return copy(session);
   }
   archive(session) { this.archived.add(session.id); this.update(session, { archived: true }); return {}; }
+
+  backendFailed(backend, error) {
+    for (const session of this.records.values()) {
+      if (!!session.dsh === (backend === 'dsh')) this.finish(session, { status: this.stopping ? 'interrupted' : 'failed', error });
+    }
+  }
 }

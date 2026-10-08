@@ -56,14 +56,14 @@ test('wire contract, owners, concurrent wait/steer, events, replay, recovery and
   const steer = hub.app.calls.find(c => c.method === 'turn/steer');
   assert.ok(steer.params.expectedTurnId);
   assert.equal((await b.request('session.wait', { id: two.id, timeoutMs: 5 })).status, 'running');
-  hub.sessions.notification('item/agentMessage/delta', { threadId: one.id, itemId: 'answer', delta: '你' });
-  hub.sessions.notification('item/reasoning/summaryTextDelta', { threadId: one.id, itemId: 'r', delta: 'Plan' });
-  hub.sessions.notification('turn/plan/updated', { threadId: one.id, plan: [{ step: 'Do it', status: 'completed' }] });
-  hub.sessions.notification('item/started', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello' } });
-  hub.sessions.notification('item/completed', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello', exitCode: 0 } });
-  hub.sessions.notification('item/completed', { threadId: one.id, item: { type: 'fileChange', id: 'patch', status: 'completed', changes: [{ path: 'example.txt' }] } });
-  hub.sessions.notification('item/completed', { threadId: one.id, item: { type: 'imageGeneration', id: 'img', savedPath: '/tmp/image.png' } });
-  hub.sessions.notification('error', { threadId: one.id, error: { message: 'Retrying' }, willRetry: true });
+  hub.codex.notification('item/agentMessage/delta', { threadId: one.id, itemId: 'answer', delta: '你' });
+  hub.codex.notification('item/reasoning/summaryTextDelta', { threadId: one.id, itemId: 'r', delta: 'Plan' });
+  hub.codex.notification('turn/plan/updated', { threadId: one.id, plan: [{ step: 'Do it', status: 'completed' }] });
+  hub.codex.notification('item/started', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello' } });
+  hub.codex.notification('item/completed', { threadId: one.id, item: { type: 'commandExecution', id: 'cmd', command: 'echo hello', exitCode: 0 } });
+  hub.codex.notification('item/completed', { threadId: one.id, item: { type: 'fileChange', id: 'patch', status: 'completed', changes: [{ path: 'example.txt' }] } });
+  hub.codex.notification('item/completed', { threadId: one.id, item: { type: 'imageGeneration', id: 'img', savedPath: '/tmp/image.png' } });
+  hub.codex.notification('error', { threadId: one.id, error: { message: 'Retrying' }, willRetry: true });
   assert.equal((await a.request('session.get', { id: one.id })).status, 'running');
   hub.app.complete(one.id);
   assert.equal((await waiting).lastMessage, 'Finished');
@@ -137,8 +137,8 @@ test('journal keeps settled text, not deltas or snapshots', async t => {
   t.after(() => client.close());
   await client.connect();
   const { id } = await client.request('session.create', { cwd: directory, prompt: 'go' });
-  for (let i = 0; i < 200; i++) hub.sessions.notification('item/agentMessage/delta', { threadId: id, itemId: 'm', delta: `w${i} ` });
-  hub.sessions.notification('item/reasoning/summaryTextDelta', { threadId: id, itemId: 'r', delta: 'think' });
+  for (let i = 0; i < 200; i++) hub.codex.notification('item/agentMessage/delta', { threadId: id, itemId: 'm', delta: `w${i} ` });
+  hub.codex.notification('item/reasoning/summaryTextDelta', { threadId: id, itemId: 'r', delta: 'think' });
   const journal = () => fs.readFileSync(hub.sessions.store.eventPath(id), 'utf8').split('\n').filter(Boolean).map(JSON.parse);
   // Mid-turn: a late viewer still gets the partial text, but nothing transient is on disk.
   assert.equal(hub.sessions.events(id).filter(e => e.kind === 'message.delta').length, 200);

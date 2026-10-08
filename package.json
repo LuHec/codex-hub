@@ -17,7 +17,8 @@
     "start": "node src/server.mjs",
     "test": "node --test test/*.test.mjs",
     "test:live": "node test/live.mjs",
-    "test:smoke": "node test/smoke.mjs"
+    "test:smoke": "node test/smoke.mjs",
+    "test:dsh:smoke": "node test/dsh-smoke.mjs"
   },
   "files": [
     "src/",

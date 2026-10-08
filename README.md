@@ -1,7 +1,8 @@
 # codex-hub
 
-A standalone local service for multiple harnesses to drive Codex through one
-`codex app-server`. Node.js 22+, an authenticated Codex installation, no npm
+A standalone local service for multiple harnesses to drive Codex or DeepSeek
+Harness (DSH). Each backend runs in its own process and starts on demand.
+Node.js 22+, an authenticated Codex installation for Codex sessions, no npm
 dependencies. Private package, installed locally; never published.
 
 ```sh
@@ -56,6 +57,50 @@ For isolation set **both** `CODEX_HUB_ENDPOINT` and `CODEX_HUB_HOME`.
 Restart interrupts active turns; the next send resumes the stored thread.
 Wait can run in a harness's background shell while another connection steers it.
 
+## DSH sessions
+
+Install DSH separately (`0.1.5-rc.1` tested). The hub launches `dsh --profile acp`;
+`DSH_BIN` can name an executable, `.cmd`, or the CLI's `lib/bin.js` file.
+Set `DEEPSEEK_API_KEY` in the hub's launch environment, or configure credentials
+in its DSH home: `<CODEX_HUB_HOME>/dsh` (normally `~/.codex-hub/dsh`).
+`CODEX_HUB_DSH_HOME` overrides that directory. The desktop DSH profile is not used.
+
+```sh
+codex-hub new --backend dsh --cwd /path/to/project --model deepseek-flash "Run the focused tests"
+codex-hub send <id> "Continue"
+codex-hub stop <id>
+```
+
+Omitting `--backend` creates a Codex session. DSH sessions carry a separate `dsh`
+object with their native id and ACP configuration options; existing Codex records
+keep their shape. There is no backend setting on an existing session.
+DSH errors stay with DSH. A failure in either process leaves the other backend usable.
+
+DSH supports follow-up turns, cancellation, restart/resume, generic tool records,
+and model/effort selection from its advertised options. Its default model comes
+from the ACP profile; `--model deepseek-flash` explicitly selects the economy model.
+
+GLM-5.3 (`--model glm-5.3`, provider `zai`) is a high-performance coding-only
+model. It does not support image recognition; give it text and source code.
+
+The hub answers owned DSH permission requests with `allow_once` when available.
+DSH uses its own execution policy: `--dir`, `--network` and `--no-full-access`
+are unsupported. It has no steering operation; stop, then send the next prompt.
+ACP text arrives at committed-message boundaries, not token by token.
+Each committed text block is journaled immediately as a cumulative message snapshot,
+so live display, history and restart preserve the same message/tool ordering.
+
+In the TUI, **n** creates a session: choose `codex` or `dsh`, enter the workspace,
+then the task. **Ctrl+U** clears an input. Lists and focus headers identify the
+backend. **p** or **/model** opens that backend's model choices. After choosing a
+different DSH model, reopen **/effort** to see its supported efforts. **Esc** stops
+a running task; typing into a running DSH session preserves the draft until it stops.
+
+`npm run test:dsh:smoke` checks the installed DSH's handshake, create, model
+configuration, close and resume after process restart, using a temporary DSH home.
+It makes no inference request. The ordinary tests use an isolated fake ACP process
+and also exercise the TUI keyboard flow.
+
 ## Client API
 
 ```js
@@ -78,6 +123,14 @@ send hub.stop during restart; ordinary connections reject incompatible servers.
 The full contract is [PROTOCOL.md](PROTOCOL.md).
 
 ## Development and verification
+
+The hub composes `Codex` (over the existing `AppServer` transport), `Dsh`, `Sessions`
+and `Store` explicitly. Both backends own protocol state, model configuration,
+resume and event translation. They receive copied records and return patches or
+normalized events; only `Sessions` writes shared session state. The TUI consumes
+display-ready model choices, with no dependency on either execution module.
+Hub shutdown always closes clients and releases its lock even when a backend
+reports a shutdown error; the original failure still reaches the caller.
 
 `npm test` runs unit/integration tests with fake Codex processes.
 `npm run test:smoke` exercises real inference, all basic

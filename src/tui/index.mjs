@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// codex-hub TUI: live view of every Codex session the hub is running.
+// codex-hub TUI: live view of Codex and DSH sessions.
 //   node src/tui/index.mjs          connect to the hub
 //   node src/tui/index.mjs --demo   fake sessions, for trying the UI
 import process from "node:process";
@@ -161,9 +161,10 @@ async function act(method, params, done) {
 // ---------- model / effort picker ----------
 
 function openPicker(session, col = 0) {
-  const models = loadModels();
-  if (!models.some((m) => m.slug === session.model)) models.unshift({ slug: session.model, efforts: [session.effort].filter(Boolean), def: session.effort });
-  const mi = Math.max(0, models.findIndex((m) => m.slug === session.model));
+  const models = loadModels(session);
+  const selected = session.modelValue ?? session.model;
+  if (!models.some((m) => m.slug === selected)) models.unshift({ slug: selected, efforts: [session.effort].filter(Boolean), def: session.effort });
+  const mi = Math.max(0, models.findIndex((m) => m.slug === selected));
   ui.picker = { id: session.id, models, mi, ei: 0, col };
   pickEffort(session.effort);
 }
@@ -185,13 +186,13 @@ function onPickerKey(key) {
       const effort = efforts[p.ei];
       p.mi = (p.mi + d + p.models.length) % p.models.length;
       pickEffort(effort);
-    } else p.ei = (p.ei + d + efforts.length) % efforts.length;
+    } else if (efforts.length) p.ei = (p.ei + d + efforts.length) % efforts.length;
   } else if (key === "\x1b[C" || key === "\x1b[D" || key === "\t" || key === "l" || key === "h") p.col = p.col ? 0 : 1;
   else if (key === "\r") {
     const model = p.models[p.mi].slug;
     const effort = efforts[p.ei];
     ui.picker = null;
-    act("session.configure", { id: p.id, model, effort }, `next turn: ${model} · ${effort}`);
+    act("session.configure", { id: p.id, model, effort }, `next turn: ${p.models[p.mi].label ?? model}${effort ? ` · ${effort}` : ""}`);
   }
   schedule();
 }
@@ -214,6 +215,9 @@ function onKey(key) {
   const sessions = model.list({ owner: ui.mineOnly ? ui.owner : null });
   const current = sessions[ui.selected];
   switch (key) {
+    case "n":
+      ui.input = { kind: "new-backend", text: "dsh" };
+      break;
     case "q":
       return quit();
     case "\x03":
@@ -262,12 +266,13 @@ function onKey(key) {
       if (ui.mineOnly && !ui.owner) flash("no owner set (CODEX_HUB_OWNER); showing sessions with no owner", "bad");
       break;
     case "s":
-      if (current?.status === "running") ui.input = { kind: "steer", id: current.id, text: "" };
+      if (current?.dsh) flash("DSH: stop the turn, then send a follow-up", "bad");
+      else if (current?.status === "running") ui.input = { kind: "steer", id: current.id, text: "" };
       else flash("steer works on a running session", "bad");
       break;
     case "m":
       if (current && current.status !== "running") ui.input = { kind: "send", id: current.id, text: "" };
-      else flash("wait for the turn to finish, or steer instead", "bad");
+      else flash(current?.dsh ? "DSH: stop the turn, then send a follow-up" : "wait for the turn to finish, or steer instead", "bad");
       break;
     case "p":
       if (current) openPicker(current);
@@ -364,6 +369,7 @@ function submit(s, menu) {
   let text = ui.input.text.trim();
   if (menu.length && !COMMANDS.some(([name]) => `/${name}` === text)) text = `/${menu[ui.menuIndex][0]}`;
   if (!text || !s) return;
+  if (!text.startsWith("/") && s.dsh && s.status === "running") return flash("DSH: esc to stop, then enter to send this draft", "bad");
   ui.input.text = "";
   ui.hist = null;
   ui.scroll = 0;
@@ -381,7 +387,8 @@ function runCommand(s, line) {
       return openPicker(s, 0);
     case "effort": {
       if (!arg) return openPicker(s, 1);
-      const efforts = loadModels().find((m) => m.slug === s.model)?.efforts ?? [];
+      const selected = s.modelValue ?? s.model;
+      const efforts = loadModels(s).find((m) => m.slug === selected)?.efforts ?? [];
       if (efforts.length && !efforts.includes(arg)) return flash(`${s.model} efforts: ${efforts.join(", ")}`, "bad");
       return act("session.configure", { id: s.id, effort: arg }, `effort ${arg} from the next turn`);
     }
@@ -409,15 +416,36 @@ function runCommand(s, line) {
 
 function onInputKey(key) {
   const input = ui.input;
+  if (input.pending) return;
   if (key === "\x1b" || key === "\x03") ui.input = null;
   else if (key === "\r") {
     const text = input.text.trim();
+    if (input.kind === "new-backend") {
+      if (!["codex", "dsh"].includes(text)) return flash("Choose codex or dsh", "bad");
+      ui.input = { kind: "new-cwd", backend: text, text: process.cwd() };
+      return schedule();
+    }
+    if (input.kind === "new-cwd") {
+      if (!text) return flash("Enter the workspace directory", "bad");
+      ui.input = { kind: "new-prompt", backend: input.backend, cwd: text, text: "" };
+      return schedule();
+    }
+    if (input.kind === "new-prompt") {
+      if (!text || input.pending) return;
+      input.pending = true;
+      request("session.create", { backend: input.backend, cwd: input.cwd, prompt: text }).then(session => {
+        model.sessions.set(session.id, session);
+        enterFocus(session); schedule();
+      }, error => { input.pending = false; flash(error.message, "bad"); });
+      return;
+    }
     ui.input = null;
     if (text) {
       if (input.kind === "steer") act("session.steer", { id: input.id, text }, "steer sent");
       else act("session.send", { id: input.id, prompt: text }, "message sent");
     }
-  } else if (key === "\x7f" || key === "\b") input.text = [...input.text].slice(0, -1).join("");
+  } else if (key === "\x15") input.text = "";
+  else if (key === "\x7f" || key === "\b") input.text = [...input.text].slice(0, -1).join("");
   else if (!key.startsWith("\x1b") && key >= " ") input.text += key;
   schedule();
 }

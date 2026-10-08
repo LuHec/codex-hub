@@ -41,7 +41,7 @@ export const methods = {
   hello: method({ protocol: integer, client: choice(['cli', 'tui']), owner: optional(owner) }, false, (h, p, c) => h.hello(c, p)),
   'hub.stop': method({}, true, h => { setImmediate(() => void h.stop()); return {}; }),
   subscribe: method({ replay: optional(integer) }, false, (h, p, c) => h.subscribe(c, p)),
-  'session.create': method({ cwd: string, prompt: string, title: optional(string), ...tuning, ...access }, true, (h, p, c) => h.sessions.create(p, c.identity)),
+  'session.create': method({ cwd: string, prompt: string, title: optional(string), backend: optional(choice(['codex', 'dsh'])), ...tuning, ...access }, true, (h, p, c) => h.sessions.create(p, c.identity)),
   'session.list': method({ owner: optional(owner) }, false, (h, p) => h.sessions.list(p.owner)),
   'session.get': method(target, false, (h, p, c, s) => structuredClone(s)),
   'session.events': method({ ...target, afterSeq: optional(integer), limit: optional(integer) }, false, (h, p, c, s) => h.sessions.events(s.id, p.afterSeq, p.limit)),
