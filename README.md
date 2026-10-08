@@ -21,7 +21,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 The installer installs Node.js LTS through winget if Node.js 22+ is missing,
-installs the global Hub, installs its own pinned DSH runtime, and configures the
+installs the global Hub, installs its own DSH runtime from npm's `latest` tag, and configures the
 ACP profile with DeepSeek and Z.ai. Existing `~/.dsh/.credentials.yaml` is referenced
 using this computer's path. No keys are copied or included in the repository.
 Existing profile settings are preserved; running the installer again is supported.

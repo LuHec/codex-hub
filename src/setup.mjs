@@ -40,7 +40,7 @@ export function setup() {
   const runtimeManifest = path.join(runtime, 'package.json');
   if (!fs.existsSync(runtimeManifest)) fs.writeFileSync(runtimeManifest, JSON.stringify({ name: 'codex-hub-dsh-runtime', private: true }));
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const result = spawnSync(npm, ['install', '--prefix', runtime, '--no-audit', '--no-fund', '@deepseek-ai/dsh@0.1.5-rc.1', 'js-yaml@4.1.0'], {
+  const result = spawnSync(npm, ['install', '--prefix', runtime, '--no-audit', '--no-fund', '@deepseek-ai/dsh@latest', 'js-yaml@4.1.0'], {
     stdio: 'inherit', shell: process.platform === 'win32', windowsHide: true,
   });
   if (result.error || result.status !== 0) throw Error('DSH installation failed');
