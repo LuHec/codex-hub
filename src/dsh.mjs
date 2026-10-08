@@ -133,7 +133,14 @@ export class Dsh {
     for (const [field, configId] of [['model', 'model'], ['effort', 'reasoning_effort']]) {
       if (p[field] == null) continue;
       const option = state.options.find(o => o.id === configId);
-      const found = choices(option).filter(o => o.value === p[field] || (field === 'model' && modelName(o.value) === p[field]));
+      let found = choices(option).filter(o => o.value === p[field] || (field === 'model' && modelName(o.value) === p[field]));
+      // Prefer the current provider for a short model name shared by several routes.
+      if (field === 'model' && found.length > 1) {
+        try {
+          const provider = JSON.parse(option.currentValue)[0];
+          found = found.filter(o => JSON.parse(o.value)[0] === provider);
+        } catch { /* Require an explicit selector when route identity is unavailable. */ }
+      }
       if (found.length !== 1) throw fault('INVALID_PARAMS', field + ' is not offered by DSH: ' + p[field]);
       if (option.currentValue === found[0].value) continue;
       const result = await this.request('session/set_config_option', { sessionId: state.id, configId, value: found[0].value });
