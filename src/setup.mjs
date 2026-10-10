@@ -22,6 +22,13 @@ export function configureProfile({ home, credentials, yaml }) {
   const patchPath = path.join(profile, 'cordis.patch.yml');
   const rows = fs.existsSync(patchPath) ? yaml.load(fs.readFileSync(patchPath, 'utf8')) ?? [] : [];
   if (!Array.isArray(rows)) throw Error('ACP patch must be an array');
+  // Hub workers use the same full-access default as Codex.
+  for (const [id, values] of [['sandbox-policy', { mode: 'danger-full-access' }],
+    ['approval', { policy: 'never' }], ['permission', { defaultPreset: 'danger-full-access' }]]) {
+    let row = rows.find(row => row.id === id);
+    if (!row) rows.push(row = { id, config: {} });
+    row.config = { ...row.config, ...values };
+  }
   let llm = rows.find(row => row.id === 'llm-pi-ai');
   if (!llm) rows.push(llm = { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: {} });
   llm.config ??= {}; llm.config.providers ??= {};

@@ -143,7 +143,9 @@ after the model changed, the backend restores the previous selection. If restora
 also fails, the error reports both failures and the snapshot records ACP's actual selection.
 
 DSH rejects steer, nonempty dirs, explicit network settings and workspace-write.
-Its own execution policy applies; the hub selects `allow_once` for permission
+New DSH sessions default to danger-full-access and approval never, including
+cross-workspace access. Persisted sessions retain their recorded permissions.
+The hub selects `allow_once` for permission
 requests belonging to its live DSH sessions, otherwise declines unsupported requests.
 Prompt is asynchronous at the hub boundary, so wait never prevents cancellation.
 ACP `cancelled` becomes interrupted, `end_turn` completed, other stop reasons failed;

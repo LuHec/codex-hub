@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+if (process.env.DSH_PERMISSION_MODE !== 'danger-full-access') throw Error('Hub DSH must launch with full access');
 const sessions = new Map();
 const pending = new Map();
 const route = model => JSON.stringify(['deepseek-official', model]);

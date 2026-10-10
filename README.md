@@ -108,7 +108,11 @@ GLM-5.3 (`--model glm-5.3`, provider `zai`) is a high-performance coding-only
 model. It does not support image recognition; give it text and source code.
 
 The hub answers owned DSH permission requests with `allow_once` when available.
-DSH uses its own execution policy: `--dir`, `--network` and `--no-full-access`
+DSH workers default to `danger-full-access` with approval `never`, including
+access outside their working directory. The launcher sets `DSH_PERMISSION_MODE`
+and setup configures the matching permission preset. Previously saved sessions
+retain their recorded permissions; create a new session to apply the new default.
+`--dir`, `--network` and `--no-full-access`
 are unsupported. It has no steering operation; stop, then send the next prompt.
 ACP text arrives at committed-message boundaries, not token by token.
 Each committed text block is journaled immediately as a cumulative message snapshot,

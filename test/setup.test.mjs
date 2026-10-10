@@ -35,5 +35,8 @@ test('setup without credentials still enables Z.ai without inventing keys', t =>
   const { profile } = configureProfile({ home, credentials: path.join(home, 'missing'), yaml });
   const rows = JSON.parse(fs.readFileSync(path.join(profile, 'cordis.patch.yml')));
   assert.equal(rows.some(r => r.id === 'credentials'), false);
-  assert.equal(rows[0].config.providers.zai.apiKeyEnv, 'ZAI_API_KEY');
+  assert.equal(rows.find(r => r.id === 'llm-pi-ai').config.providers.zai.apiKeyEnv, 'ZAI_API_KEY');
+  assert.equal(rows.find(r => r.id === 'sandbox-policy').config.mode, 'danger-full-access');
+  assert.equal(rows.find(r => r.id === 'approval').config.policy, 'never');
+  assert.equal(rows.find(r => r.id === 'permission').config.defaultPreset, 'danger-full-access');
 });

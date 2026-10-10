@@ -42,7 +42,7 @@ export class Dsh {
     const executable = script ? process.execPath : shell && /\s/.test(this.command) ? `"${this.command}"` : this.command;
     this.proc = spawn(executable, [...(script ? [this.command] : []), '--profile', 'acp'], {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell,
-      env: { ...process.env, DSH_HOME: this.home },
+      env: { ...process.env, DSH_HOME: this.home, DSH_PERMISSION_MODE: 'danger-full-access' },
     });
     this.stderr = '';
     this.exited = new Promise(resolve => { this.resolveExit = resolve; });
