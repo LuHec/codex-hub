@@ -5,6 +5,9 @@ import { fault, directory } from './protocol.mjs';
 import { translate } from './translate.mjs';
 
 const input = text => [{ type: 'text', text, text_elements: [] }];
+// Omitting sources defaults to interactive threads, and would miss app-server threads.
+const allSources = ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+  'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'];
 const sandbox = session => ({
   sandbox: session.sandbox ?? 'danger-full-access',
   config: { sandbox_workspace_write: { writable_roots: session.dirs ?? [], network_access: !!session.network } },
@@ -38,6 +41,27 @@ export class Codex {
   state(id) {
     if (!this.runtime.has(id)) this.runtime.set(id, { resumed: false, turnId: null });
     return this.runtime.get(id);
+  }
+  async activeThreadIds() {
+    await this.start();
+    const ids = new Set(), cursors = new Set();
+    let cursor;
+    do {
+      const page = await this.app.request('thread/list', {
+        archived: false, modelProviders: [], sourceKinds: allSources, limit: 100,
+        ...(cursor ? { cursor } : {}),
+      }, { timeoutMs: 15_000, fatal: false });
+      // Never turn a failed, malformed, or incomplete listing into deletions.
+      if (!Array.isArray(page?.data) || page.data.some(t => typeof t?.id !== 'string' || !t.id)
+        || !(page.nextCursor === null || (typeof page.nextCursor === 'string' && page.nextCursor))) {
+        throw new Error('Invalid Codex thread/list response; startup sync skipped');
+      }
+      for (const thread of page.data) ids.add(thread.id);
+      cursor = page.nextCursor;
+      if (cursor && cursors.has(cursor)) throw new Error('Repeated Codex thread/list cursor; startup sync skipped');
+      cursors.add(cursor);
+    } while (cursor);
+    return ids;
   }
   snapshot(session) {
     let modelOptions = session.modelOptions ?? [];

@@ -14,6 +14,7 @@ export class Sessions {
     this.onEvent = onEvent;
     this.records = new Map();
     this.archived = new Set();
+    this.deleted = new Set();
     this.seq = 0;
     this.runtime = new Map();
     this.queues = new Map();
@@ -24,6 +25,7 @@ export class Sessions {
     const state = this.store.load();
     this.records = new Map(state.sessions.map(s => [s.id, s]));
     this.archived = new Set(state.archived);
+    this.deleted = new Set(state.deleted ?? []);
     this.seq = state.seq;
     this.loaded = true;
     for (const session of this.records.values()) {
@@ -39,7 +41,25 @@ export class Sessions {
     this.persist();
   }
   backend(session) { return session.dsh ? this.dsh : this.codex; }
-  persist() { this.store.persist({ seq: this.seq, sessions: [...this.records.values()], archived: [...this.archived] }); }
+  persist() { this.store.persist({ seq: this.seq, sessions: [...this.records.values()], archived: [...this.archived], deleted: [...this.deleted] }); }
+  async reconcileBackend(name) {
+    const candidates = [...this.records.values()].filter(s => !!s.dsh === (name === 'dsh'));
+    if (!candidates.length) return;
+    const active = await this[name].activeThreadIds();
+    if (this.stopping) return;
+    const removed = candidates.filter(s => !active.has(s.id)).map(s => s.id);
+    if (!removed.length) return;
+    const deleted = new Set([...this.deleted, ...removed]);
+    const records = new Map([...this.records].filter(([id]) => !deleted.has(id)));
+    const archived = new Set([...this.archived].filter(id => !deleted.has(id)));
+    // Commit tombstones before removing journals, so crash recovery cannot resurrect them.
+    this.store.persist({ seq: this.seq, sessions: [...records.values()], archived: [...archived], deleted: [...deleted] });
+    this.records = records; this.archived = archived; this.deleted = deleted;
+    for (const id of removed) {
+      this.runtime.delete(id);
+      this.store.removeHistory(id);
+    }
+  }
   settled(id) { return this.queues.get(id)?.catch(() => {}); }
   async stop() {
     this.stopping = true;

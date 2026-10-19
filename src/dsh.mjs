@@ -59,6 +59,7 @@ export class Dsh {
       catch (error) { this.fail(fault('DSH_ERROR', `Invalid ACP frame: ${error.message}`)); }
     });
     const hello = await this.request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'codex-hub', version: VERSION } });
+    this.sessionCapabilities = hello.agentCapabilities?.sessionCapabilities;
     if (hello.protocolVersion !== 1 || !hello.agentCapabilities?.sessionCapabilities?.resume) {
       throw fault('DSH_ERROR', 'DSH must support ACP v1 session/resume (tested with 0.1.5-rc.1).');
     }
@@ -80,12 +81,16 @@ export class Dsh {
       msg.error ? pending.reject(fault(msg.error.code === -32602 ? 'INVALID_PARAMS' : 'DSH_ERROR', msg.error.message)) : pending.resolve(msg.result);
     } else if (msg.method === 'session/update') this.notification(msg.params.sessionId, msg.params.update);
   }
-  request(method, params, timeoutMs = 30_000) {
+  request(method, params, timeoutMs = 30_000, { fatal = true } = {}) {
     if (this.dead) return Promise.reject(this.dead);
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       // A prompt may run for hours; cancellation is a separate ACP notification.
-      const timer = timeoutMs ? setTimeout(() => this.fail(fault('DSH_ERROR', `ACP request timed out: ${method}`)), timeoutMs) : null;
+      const timer = timeoutMs ? setTimeout(() => {
+        const error = fault('DSH_ERROR', `ACP request timed out: ${method}`);
+        if (fatal) this.fail(error);
+        else { this.pending.delete(id); reject(error); }
+      }, timeoutMs) : null;
       this.pending.set(id, { resolve, reject, timer });
       try { this.write({ id, method, params }); } catch (error) { this.fail(error); }
     });
@@ -99,6 +104,47 @@ export class Dsh {
       modelValue: model?.currentValue ?? null,
       modelOptions: choices(model).map(o => ({ slug: o.value, label: o.name,
         efforts: o.value === model.currentValue ? choices(effort).map(e => e.value) : [], def: effort?.currentValue })) });
+  }
+  archivedSessionIds() {
+    // ACP list includes archived records. The workspace domain owns that flag.
+    // Read only the Hub's DSH home, never the desktop's separate profile.
+    const root = path.join(this.home, 'storages');
+    for (const [file, perRecord] of [['workspace.json', false], ['workspace/global.json', true]]) {
+      let document;
+      try { document = JSON.parse(fs.readFileSync(path.join(root, file), 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      const version = perRecord ? document.version : document.unit?.version;
+      const state = perRecord ? document.record : document.global;
+      if (version !== 2 || (!perRecord && document.unit?.name !== 'workspace') || !state
+        || !Array.isArray(state.workspaceIds) || typeof state.initialized !== 'boolean'
+        || (state.archivedSessionIds !== undefined && (!Array.isArray(state.archivedSessionIds)
+          || state.archivedSessionIds.some(id => typeof id !== 'string' || !id)))) {
+        throw fault('DSH_ERROR', 'Unknown DSH workspace archive format; startup sync skipped');
+      }
+      return new Set(state.archivedSessionIds ?? []);
+    }
+    return new Set();
+  }
+  async activeThreadIds() {
+    await this.start();
+    if (!this.sessionCapabilities?.list) throw fault('DSH_ERROR', 'DSH does not offer session/list; startup sync skipped');
+    // Only call at Hub startup, before resume: ACP intentionally omits loaded sessions.
+    if (this.sessions.size) throw fault('DSH_ERROR', 'DSH startup sync requires unloaded sessions');
+    const ids = new Set(), cursors = new Set();
+    let cursor;
+    do {
+      const page = await this.request('session/list', cursor ? { cursor } : {}, 15_000, { fatal: false });
+      if (!Array.isArray(page?.sessions) || page.sessions.some(s => typeof s?.sessionId !== 'string' || !s.sessionId)
+        || (page.nextCursor != null && (typeof page.nextCursor !== 'string' || !page.nextCursor))) {
+        throw fault('DSH_ERROR', 'Invalid DSH session/list response; startup sync skipped');
+      }
+      for (const session of page.sessions) ids.add('dsh:' + session.sessionId);
+      cursor = page.nextCursor;
+      if (cursor && cursors.has(cursor)) throw fault('DSH_ERROR', 'Repeated DSH session/list cursor; startup sync skipped');
+      cursors.add(cursor);
+    } while (cursor);
+    for (const id of this.archivedSessionIds()) ids.delete('dsh:' + id);
+    return ids;
   }
   access(p) {
     if (p.dirs?.length || p.network !== undefined || (p.sandbox !== undefined && p.sandbox !== 'danger-full-access')) {

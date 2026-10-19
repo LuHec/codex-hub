@@ -79,8 +79,12 @@ export class Hub {
       });
       this.bound = true;
       if (process.platform !== 'win32') fs.chmodSync(this.endpoint, 0o600);
-      // Each backend starts on its first session; a DSH task does not require Codex.
-      this.ready = Promise.resolve();
+      // One reconciliation per Hub startup, before exposing session snapshots.
+      // Only backends with stored records start; one failed backend does not block the other.
+      this.ready = Promise.all(['codex', 'dsh'].map(name =>
+        this.sessions.reconcileBackend(name).catch(error => {
+          console.error(`${name === 'codex' ? 'Codex' : 'DSH'} startup sync failed: ${error.message}`);
+        })));
       await this.ready;
       this.writeLock();
       this.server.on('error', error => { console.error(error); void this.stop(); });

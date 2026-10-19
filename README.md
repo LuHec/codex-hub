@@ -78,6 +78,16 @@ then `codex` on PATH. `CODEX_BIN` is an unquoted executable path without argumen
 State defaults to `~/.codex-hub`, diagnostics to `hub.log` in that directory.
 For isolation set **both** `CODEX_HUB_ENDPOINT` and `CODEX_HUB_HOME`.
 Restart interrupts active turns; the next send resumes the stored thread.
+At Hub startup, existing Codex sessions are reconciled once against Codex's full
+non-archived thread list, before clients receive session lists. Threads archived
+or deleted in Codex are removed from Hub state and their Hub history files are
+deleted. Failed or incomplete queries leave local records intact and log the
+failure. There is no periodic polling; changes made while the Hub runs are
+reconciled on its next startup. DSH sessions are reconciled independently using
+ACP `session/list` pagination plus the workspace archive registry under the Hub's
+DSH home. A backend is started for this check only when it has local records.
+Unsupported listing, unreadable archive state, and query failures preserve that
+backend's records. DSH's source session files are never deleted by the Hub sync.
 Wait can run in a harness's background shell while another connection steers it.
 
 ## DSH sessions

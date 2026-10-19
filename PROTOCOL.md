@@ -185,7 +185,18 @@ The TUI does not read ACP configuration or the Codex model cache. Older saved
 sessions acquire these fields when loaded; backend-specific durable data remains
 in its existing record shape.
 
-`state.json` is `{ version: 2, seq, sessions, archived }`, replaced atomically.
+`state.json` is `{ version: 2, seq, sessions, archived, deleted }`, replaced atomically.
+`deleted` defaults to an empty array in older files. At Hub startup, a complete
+paginated Codex non-archived thread listing is fetched across all providers and
+source kinds. Local Codex sessions absent from that listing are deleted, including
+their Hub journals. DSH records are reconciled separately against ACP `session/list`
+and the DSH home's workspace archive registry (`storages/workspace.json`, or the
+per-record `storages/workspace/global.json`; workspace format v2). ACP listing runs
+before any session resume because DSH omits loaded sessions from its results.
+Only backends with local records are started. Listing failures or malformed pages
+skip reconciliation without deleting records. This is a startup action, not polling.
+Deletion IDs are persisted before removing journals; the loader ignores and retries
+removing tombstoned journals so a crash or locked file cannot resurrect a session.
 Events live in `sessions/<encodeURIComponent(id)>.jsonl` (Codex UUID filenames are unchanged).
 The storage loader migrates v1 owners once:
 `a:b` becomes `{harness:"a", id:"b"}`; a bare legacy ID becomes

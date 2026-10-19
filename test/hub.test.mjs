@@ -12,6 +12,7 @@ class FakeApp {
   async close() {}
   async request(method, params) {
     this.calls.push({ method, params });
+    if (method === 'thread/list') return { data: [{ id: 'thread-1' }, { id: 'thread-2' }], nextCursor: null };
     if (method === 'thread/start') return { thread: { id: `thread-${++this.number}` } };
     if (method === 'turn/start') {
       const turn = { id: `turn-${this.calls.length}`, status: 'inProgress' };

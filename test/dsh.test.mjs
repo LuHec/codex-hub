@@ -14,6 +14,70 @@ import { render } from '../src/tui/view.mjs';
 import { renderFocus } from '../src/tui/focus.mjs';
 
 const command = fileURLToPath(new URL('./fixtures/dsh.mjs', import.meta.url));
+test('DSH startup removes deleted and archived sessions and keeps resumable sessions', async t => {
+  const f = await fixture(t);
+  const created = [];
+  for (let i = 0; i < 3; i++) {
+    const session = await f.client.request('session.create', { backend: 'dsh', cwd: f.directory, prompt: 'hello' });
+    await f.client.request('session.wait', { id: session.id });
+    created.push(session);
+  }
+  const [active, archived, deleted] = created;
+  fs.unlinkSync(path.join(f.directory, 'dsh', deleted.dsh.id));
+  const storage = path.join(f.directory, 'dsh', 'storages');
+  fs.mkdirSync(storage);
+  fs.writeFileSync(path.join(storage, 'workspace.json'), JSON.stringify({ unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, workspaceIds: [], archivedSessionIds: [archived.dsh.id] }, tables: {} }));
+  await f.restart();
+  assert.deepEqual((await f.client.request('session.list')).map(s => s.id), [active.id]);
+  for (const session of [archived, deleted]) {
+    assert.equal(fs.existsSync(f.hub.sessions.store.eventPath(session.id)), false);
+    await assert.rejects(f.client.request('session.get', { id: session.id }), { code: 'NOT_FOUND' });
+  }
+  assert.ok(fs.existsSync(path.join(f.directory, 'dsh', archived.dsh.id)));
+  await f.client.request('session.send', { id: active.id, prompt: 'continue' });
+  assert.equal((await f.client.request('session.wait', { id: active.id })).status, 'idle');
+  await f.restart();
+  assert.deepEqual((await f.client.request('session.list')).map(s => s.id), [active.id]);
+});
+
+test('DSH startup rejects partial pages, unsupported listing, loaded sessions and malformed archives', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-sync-validation-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const dsh = new Dsh({ directory, home: directory });
+  dsh.start = async () => {};
+  await assert.rejects(dsh.activeThreadIds(), /does not offer/);
+  dsh.sessionCapabilities = { list: {} };
+  dsh.sessions.set('loaded', {});
+  await assert.rejects(dsh.activeThreadIds(), /unloaded/);
+  dsh.sessions.clear();
+  dsh.request = async () => ({ sessions: [{ sessionId: 'active' }], nextCursor: 'loop' });
+  await assert.rejects(dsh.activeThreadIds(), /Repeated/);
+  dsh.request = async () => ({ sessions: [{ sessionId: null }] });
+  await assert.rejects(dsh.activeThreadIds(), /Invalid/);
+  dsh.request = async (_, p) => {
+    if (p.cursor) throw Error('later page unavailable');
+    return { sessions: [], nextCursor: 'second' };
+  };
+  await assert.rejects(dsh.activeThreadIds(), /later page/);
+  dsh.request = async () => ({ sessions: [{ sessionId: 'active' }, { sessionId: 'archived' }] });
+  fs.mkdirSync(path.join(directory, 'storages', 'workspace'), { recursive: true });
+  const file = path.join(directory, 'storages', 'workspace', 'global.json');
+  fs.writeFileSync(file, '{broken');
+  await assert.rejects(dsh.activeThreadIds());
+  fs.writeFileSync(file, JSON.stringify({ version: 2, record: { initialized: true, workspaceIds: [], archivedSessionIds: ['archived'] } }));
+  assert.deepEqual([...await dsh.activeThreadIds()], ['dsh:active']);
+});
+
+test('DSH listing timeout does not kill the ACP connection', async () => {
+  const dsh = new Dsh({ directory: os.tmpdir(), onExit() { assert.fail('must not exit'); } });
+  dsh.write = () => {};
+  await assert.rejects(dsh.request('session/list', {}, 5, { fatal: false }), /timed out/);
+  assert.equal(dsh.dead, undefined);
+  assert.equal(dsh.pending.size, 0);
+  dsh.write = msg => dsh.receive({ id: msg.id, result: { sessions: [] } });
+  assert.deepEqual(await dsh.request('session/list', {}), { sessions: [] });
+});
 async function fixture(t, codexMissing = false) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-dsh-test-'));
   const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\${path.basename(directory)}` : path.join(directory, 'hub.sock');

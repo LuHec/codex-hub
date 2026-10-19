@@ -18,7 +18,14 @@ readline.createInterface({ input: process.stdin }).on('line', row => {
   const m = JSON.parse(row), p = m.params ?? {};
   if (m.jsonrpc !== '2.0') process.exit(2);
   const reply = result => write({ id: m.id, result });
-  if (m.method === 'initialize') return reply({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {}, close: {} } } });
+  if (m.method === 'initialize') return reply({ protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {}, close: {}, list: {} } } });
+  if (m.method === 'session/list') {
+    const ids = fs.readdirSync(process.env.DSH_HOME).filter(id => id.startsWith('native-') && !sessions.has(id)).sort();
+    const at = p.cursor ? ids.indexOf(p.cursor) + 1 : 0;
+    const page = ids.slice(at, at + 1);
+    return reply({ sessions: page.map(sessionId => ({ sessionId })),
+      ...(at + 1 < ids.length ? { nextCursor: page[0] } : {}) });
+  }
   if (m.method === 'session/new') {
     const sessionId = `native-${++number}`;
     sessions.set(sessionId, options());

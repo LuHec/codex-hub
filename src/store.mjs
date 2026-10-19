@@ -19,7 +19,7 @@ export class Store {
     fs.renameSync(`${target}.tmp`, target);
   }
   load() {
-    let seq = 0, archived = [];
+    let seq = 0, archived = [], deleted = [];
     const sessions = new Map();
     if (fs.existsSync(this.statePath())) {
       const state = JSON.parse(fs.readFileSync(this.statePath(), 'utf8'));
@@ -27,13 +27,22 @@ export class Store {
       seq = state.seq || 0;
       for (const session of state.sessions || []) sessions.set(session.id, { ...session, owner: migrateOwner(session.owner) });
       archived = state.archived || [];
+      deleted = state.deleted || [];
     }
+    const tombstones = new Set(deleted);
+    const deletedFiles = new Map(deleted.map(id => [`${encodeURIComponent(id)}.jsonl`, id]));
+    for (const id of tombstones) sessions.delete(id);
+    archived = archived.filter(id => !tombstones.has(id));
     // Journals are the recovery source if the process died before state replacement:
     // a journaled snapshot counts only when it is newer than state.json.
     const stateSeq = seq;
     for (const file of fs.readdirSync(path.join(this.directory, 'sessions'))) {
       if (!file.endsWith('.jsonl')) continue;
       const filename = path.join(this.directory, 'sessions', file);
+      if (deletedFiles.has(file)) {
+        this.removeHistory(deletedFiles.get(file));
+        continue;
+      }
       const data = fs.readFileSync(filename, 'utf8');
       const complete = data.lastIndexOf('\n') + 1;
       if (complete < data.length) fs.truncateSync(filename, Buffer.byteLength(data.slice(0, complete)));
@@ -53,12 +62,16 @@ export class Store {
         fs.renameSync(`${filename}.tmp`, filename);
       }
     }
-    const state = { seq, sessions: [...sessions.values()], archived };
+    const state = { seq, sessions: [...sessions.values()], archived, deleted };
     this.persist(state);
     return state;
   }
   append(event) {
     fs.appendFileSync(this.eventPath(event.sessionId), JSON.stringify(event) + '\n', { mode: 0o600 });
+  }
+  removeHistory(id) {
+    try { fs.rmSync(this.eventPath(id), { force: true }); }
+    catch (error) { console.error(`Could not remove tombstoned Hub history ${id}: ${error.message}`); }
   }
   history(id) {
     const text = fs.existsSync(this.eventPath(id)) ? fs.readFileSync(this.eventPath(id), 'utf8') : '';
