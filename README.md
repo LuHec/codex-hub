@@ -3,7 +3,7 @@
 A standalone local service for multiple harnesses to drive Codex or DeepSeek
 Harness (DSH). Each backend runs in its own process and starts on demand.
 Node.js 22+, an authenticated Codex installation for Codex sessions, no npm
-dependencies. Private package, installed locally; never published.
+dependencies. Install the package directly from this repository.
 
 ```sh
 npm install -g <path to this repository>
@@ -11,11 +11,10 @@ npm install -g <path to this repository>
 
 ## Automatic setup
 
-On a new Windows computer, authenticate GitHub CLI for access to this private
-repository, then run:
+On Windows, clone the repository and run the installer:
 
 ```powershell
-gh repo clone LuHec/codex-hub
+git clone https://github.com/LuHec/codex-hub.git
 cd codex-hub
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
