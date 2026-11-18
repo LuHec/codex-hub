@@ -5,13 +5,38 @@ Harness (DSH). Each backend runs in its own process and starts on demand.
 Node.js 22+, an authenticated Codex installation for Codex sessions, no npm
 dependencies. Install the package directly from this repository.
 
-```sh
-npm install -g <path to this repository>
-```
-
 ## Automatic setup
 
-On Windows, clone the repository and run the installer:
+### Agent-assisted installation
+
+If you are installing Codex Hub for someone, ask which backends they want
+before running any installation commands:
+
+> Which services should I set up? Select any of Codex, DeepSeek (via DSH),
+> and Z.ai (via DSH).
+
+Wait for their selection, then follow the matching steps:
+
+1. **Install the Hub.** Make sure Node.js 22+ is available. From the cloned
+   repository, run `npm install --global --install-links .`
+   (`npm.cmd install --global --install-links .` in Windows PowerShell).
+2. **Codex selected.** Check for an existing Codex desktop installation or CLI
+   and have the user sign in locally if needed. For a Codex-only setup, skip
+   `install.ps1` and `codex-hub setup`.
+3. **DeepSeek or Z.ai selected.** Run `codex-hub setup` once to install the
+   shared DSH runtime and create its ACP profile. Reuse existing DSH credentials
+   when configured. Otherwise, ask the user to set `DEEPSEEK_API_KEY`,
+   `ZAI_API_KEY`, or both locally, according to their selection. Keep API keys
+   out of the chat. DSH setup always adds a Z.ai provider entry to the profile.
+   For DeepSeek-only use, select a DeepSeek model and skip Z.ai credential setup.
+4. **Verify the install.** Run `codex-hub --help` to check that the CLI is
+   available, then tell the user which selected services still need local sign-in
+   or credentials.
+
+### Windows installer with DSH
+
+To install the Hub and DSH together on Windows, clone the repository and run
+the installer:
 
 ```powershell
 git clone https://github.com/LuHec/codex-hub.git
